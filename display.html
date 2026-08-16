@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>جدول المشاركين</title>
+<style>
+html,body{margin:0;width:100%;height:100%;background:transparent;overflow:hidden}
+body{font-family:Arial,sans-serif;display:flex;align-items:center;justify-content:center}
+.board{width:min(900px,90vw);display:flex;flex-direction:column;gap:8px}
+.row{height:60px;display:grid;grid-template-columns:65px 1fr;direction:ltr}
+.num,.name{display:flex;align-items:center;box-sizing:border-box;border:2px solid rgba(255,255,255,.32);background:rgba(12,16,22,.62);backdrop-filter:blur(5px);color:#fff;box-shadow:0 4px 18px rgba(0,0,0,.22)}
+.num{justify-content:center;font-size:22px;font-weight:900;border-radius:15px 0 0 15px}
+.name{direction:rtl;justify-content:flex-start;padding:0 20px;font-size:24px;font-weight:800;border-radius:0 15px 15px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+</style>
+</head>
+<body>
+<div class="board" id="board"></div>
+<script>
+function render(s){
+ const board=document.getElementById('board');board.innerHTML='';
+ const participants=s.participants||[];
+ participants.forEach((p,i)=>{
+   const row=document.createElement('div');row.className='row';
+   const num=document.createElement('div');num.className='num';num.textContent=i+1;
+   const name=document.createElement('div');name.className='name';name.textContent=p.youtubeName||'';
+   row.append(num,name);board.append(row);
+ });
+}
+fetch('/api/state').then(r=>r.json()).then(render);
+const wsProtocol=location.protocol==='https:'?'wss:':'ws:';
+const ws=new WebSocket(`${wsProtocol}//${location.host}`);
+ws.onmessage=e=>{const d=JSON.parse(e.data);if(d.type==='state')render(d.state)};
+</script>
+</body>
+</html>

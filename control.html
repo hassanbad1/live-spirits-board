@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>لوحة تحكم فعالية الأرواح</title>
+<style>
+body{font-family:Arial,sans-serif;background:#101318;color:#fff;margin:0;padding:28px}
+.wrap{max-width:1000px;margin:auto}.card{background:#1b2028;border:1px solid #303743;border-radius:18px;padding:22px;margin-bottom:18px}
+h1{margin-top:0}.row{display:flex;gap:10px;flex-wrap:wrap}
+input,button{font:inherit;border-radius:10px;padding:11px 14px;border:1px solid #3a424e}
+input{background:#0f1318;color:#fff;min-width:260px}button{cursor:pointer;background:#2a313b;color:#fff}
+.start{background:#16834a}.stop{background:#a52d38}.danger{background:#7b222b}.save{background:#245a9c}
+.status{font-weight:bold}.muted{color:#aab3bf}
+.keywordBox{margin-top:18px;padding:16px;border-radius:14px;background:#11161c;border:1px solid #303743}
+.keywordBox label{display:block;margin-bottom:8px;font-weight:bold}.keywordBox input{width:calc(100% - 30px);min-width:0}
+.tableWrap{overflow-x:auto}table{width:100%;border-collapse:separate;border-spacing:0 8px}
+th{padding:10px;color:#aab3bf;text-align:right}td{padding:12px;background:#11161c;vertical-align:top}
+td:first-child{width:55px;text-align:center;border-radius:8px 0 0 8px}td:last-child{border-radius:0 8px 8px 0;width:90px}
+.number{font-weight:bold}.youtubeName{font-weight:bold}.comment{word-break:break-word;color:#dce2e9}.empty{color:#697482}.small{font-size:13px}
+.linkBox{margin-top:18px;padding:14px;background:#11161c;border:1px solid #303743;border-radius:14px}
+.linkBox input{width:calc(100% - 30px);min-width:0}
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="card">
+<h1>🎮 لوحة تحكم فعالية الأرواح</h1>
+<p class="muted">المسابقة تبدأ من الرسائل الجديدة بعد الضغط على «بداية». الرسائل القديمة لا تدخل.</p>
+<div class="row">
+<input id="broadcastId" placeholder="Broadcast ID (اختياري إذا عندك بث نشط)">
+<button class="save" onclick="saveConfig()">💾 حفظ</button>
+</div>
+<div class="keywordBox">
+<label>🔑 كلمة التسجيل في الشات</label>
+<div class="row">
+<input id="keyword" placeholder="مثال: ارواح!">
+<button class="save" onclick="saveKeyword()">حفظ كلمة التسجيل</button>
+</div>
+<p class="muted small">يجب أن يبدأ التعليق بهذه الكلمة. مثال: <b>ارواح! HASSAN397 الذهبية</b></p>
+</div>
+<div class="linkBox">
+<b>🖥️ رابط شاشة OBS</b>
+<div class="row" style="margin-top:8px">
+<input id="obsUrl" readonly>
+<button onclick="copyObsUrl()">📋 نسخ الرابط</button>
+</div>
+<p class="muted small">ضع هذا الرابط في Browser Source داخل OBS عندما يكون الموقع منشورًا على الإنترنت.</p>
+</div>
+<br>
+<div class="row">
+<button class="start" onclick="start()">▶ بداية — مسابقة جديدة</button>
+<button onclick="connectYouTube()">🔗 ربط حساب YouTube</button>
+<button class="stop" onclick="stop()">⏹ توقف</button>
+<button class="danger" onclick="resetAll()">🗑 مسح كل شيء</button>
+</div>
+<p>الحالة: <span id="status" class="status">متوقف</span> | في الجدول: <span id="count">0</span>/40 | الانتظار: <span id="queue">0</span></p>
+</div>
+<div class="card">
+<h2>👥 المشاركون</h2>
+<div class="tableWrap"><table><thead><tr><th>#</th><th>اسم صاحب التعليق</th><th>التعليق الكامل</th><th></th></tr></thead><tbody id="rows"></tbody></table></div>
+</div>
+</div>
+<script>
+let ws;
+function render(s){
+ document.getElementById('status').textContent=s.status||'متوقف';
+ const participants=s.participants||[];
+ document.getElementById('count').textContent=participants.length;
+ document.getElementById('queue').textContent=s.queued||0;
+ document.getElementById('broadcastId').value=s.broadcastId||'';
+ document.getElementById('keyword').value=s.keyword||'';
+ document.getElementById('obsUrl').value=`${location.origin}/display.html`;
+ const rows=document.getElementById('rows');rows.innerHTML='';
+ for(let i=0;i<40;i++){
+   const tr=document.createElement('tr'); const p=participants[i];
+   if(p){tr.innerHTML=`<td class="number">${i+1}</td><td class="youtubeName">${escapeHtml(p.youtubeName||'—')}</td><td class="comment">${escapeHtml(p.comment||'—')}</td><td><button onclick="del(${i})">حذف</button></td>`;}
+   else{tr.innerHTML=`<td class="number">${i+1}</td><td class="empty">—</td><td class="empty">—</td><td>—</td>`;}
+   rows.appendChild(tr);
+ }
+}
+function escapeHtml(value){return String(value||'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]))}
+async function api(url,body={}){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json();if(!j.ok)alert(j.error||'حدث خطأ');return j}
+async function saveConfig(){await api('/api/config',{broadcastId:document.getElementById('broadcastId').value,keyword:document.getElementById('keyword').value})}
+async function saveKeyword(){const keyword=document.getElementById('keyword').value.trim();if(!keyword){alert('اكتب كلمة التسجيل أولًا.');return;}await api('/api/config',{keyword})}
+function connectYouTube(){window.location.href='/api/auth'}
+async function start(){const keyword=document.getElementById('keyword').value.trim();if(!keyword){alert('اكتب كلمة التسجيل أولًا.');return;}const r=await api('/api/start',{broadcastId:document.getElementById('broadcastId').value,keyword});if(r.ok)alert('بدأت المسابقة الجديدة ✅')}
+async function stop(){await api('/api/stop')}
+async function del(i){await api('/api/delete/'+i)}
+async function resetAll(){if(confirm('مسح الجدول والسجل بالكامل؟'))await api('/api/reset')}
+async function copyObsUrl(){const v=document.getElementById('obsUrl').value;try{await navigator.clipboard.writeText(v);alert('تم نسخ الرابط ✅')}catch(e){prompt('انسخ الرابط:',v)}}
+fetch('/api/state').then(r=>r.json()).then(render);
+const wsProtocol=location.protocol==='https:'?'wss:':'ws:';
+ws=new WebSocket(`${wsProtocol}//${location.host}`);
+ws.onmessage=e=>{const d=JSON.parse(e.data);if(d.type==='state')render(d.state)};
+</script>
+</body>
+</html>
