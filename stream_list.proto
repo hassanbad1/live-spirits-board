@@ -1,0 +1,79 @@
+syntax = "proto2";
+
+package youtube.api.v3;
+
+service V3DataLiveChatMessageService {
+  rpc StreamList(LiveChatMessageListRequest)
+      returns (stream LiveChatMessageListResponse) {}
+}
+
+message LiveChatMessageListRequest {
+  optional string live_chat_id = 1;
+  optional string hl = 2;
+  optional uint32 profile_image_size = 3;
+  optional uint32 max_results = 98;
+  optional string page_token = 99;
+  repeated string part = 100;
+}
+
+message LiveChatMessageListResponse {
+  optional string kind = 200;
+  optional string etag = 201;
+  optional string offline_at = 2;
+  optional PageInfo page_info = 1004;
+  optional string next_page_token = 100602;
+  repeated LiveChatMessage items = 1007;
+}
+
+message PageInfo {
+  optional int32 total_results = 1;
+  optional int32 results_per_page = 2;
+}
+
+message LiveChatMessage {
+  optional string kind = 200;
+  optional string etag = 201;
+  optional string id = 101;
+  optional LiveChatMessageSnippet snippet = 2;
+  optional LiveChatMessageAuthorDetails author_details = 3;
+}
+
+message LiveChatMessageSnippet {
+  enum Type {
+    INVALID_TYPE = 0;
+    TEXT_MESSAGE_EVENT = 1;
+    TOMBSTONE = 2;
+    FAN_FUNDING_EVENT = 3;
+    CHAT_ENDED_EVENT = 4;
+    SPONSOR_ONLY_MODE_STARTED_EVENT = 5;
+    SPONSOR_ONLY_MODE_ENDED_EVENT = 6;
+    NEW_SPONSOR_EVENT = 7;
+    MESSAGE_DELETED_EVENT = 8;
+    MESSAGE_RETRACTED_EVENT = 9;
+    USER_BANNED_EVENT = 10;
+    SUPER_CHAT_EVENT = 15;
+    SUPER_STICKER_EVENT = 16;
+    MEMBER_MILESTONE_CHAT_EVENT = 17;
+    MEMBERSHIP_GIFTING_EVENT = 18;
+    GIFT_MEMBERSHIP_RECEIVED_EVENT = 19;
+    POLL_EVENT = 20;
+  }
+
+  optional Type type = 1;
+  optional string live_chat_id = 2;
+  optional string author_channel_id = 3;
+  optional string published_at = 4;
+  optional bool has_display_content = 5;
+  optional string display_message = 6;
+}
+
+message LiveChatMessageAuthorDetails {
+  optional string channel_id = 1;
+  optional string channel_url = 2;
+  optional string display_name = 3;
+  optional string profile_image_url = 4;
+  optional bool is_verified = 5;
+  optional bool is_chat_owner = 6;
+  optional bool is_chat_sponsor = 7;
+  optional bool is_chat_moderator = 8;
+}
