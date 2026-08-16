@@ -144,7 +144,7 @@ function makeOAuthClient() {
   return new google.auth.OAuth2(
     config.client_id,
     config.client_secret,
-    `http://localhost:${PORT}/oauth2callback`
+    process.env.REDIRECT_URI || `http://localhost:${PORT}/oauth2callback`
   );
 }
 
