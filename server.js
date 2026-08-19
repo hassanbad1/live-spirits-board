@@ -15,16 +15,31 @@ const wss = new WebSocket.Server({ server });
 
 app.use(express.json());
 
-// السماح بخدمة الملفات إذا كانت داخل public
-app.use(express.static(path.join(__dirname, "public")));
+/* =========================
+   الملفات العامة
+========================= */
+
+app.use(
+  express.static(
+    path.join(__dirname, "public")
+  )
+);
 
 /* =========================
    صفحات الموقع
 ========================= */
 
 app.get("/", (req, res) => {
-  const publicIndex = path.join(__dirname, "public", "index.html");
-  const rootIndex = path.join(__dirname, "index.html");
+  const publicIndex = path.join(
+    __dirname,
+    "public",
+    "index.html"
+  );
+
+  const rootIndex = path.join(
+    __dirname,
+    "index.html"
+  );
 
   if (fs.existsSync(publicIndex)) {
     return res.sendFile(publicIndex);
@@ -34,31 +49,40 @@ app.get("/", (req, res) => {
     return res.sendFile(rootIndex);
   }
 
-  res.status(404).send("لم يتم العثور على index.html.");
+  res
+    .status(404)
+    .send("لم يتم العثور على index.html.");
 });
 
-app.get("/control.html", (req, res, next) => {
-  const publicControl = path.join(
-    __dirname,
-    "public",
-    "control.html"
-  );
+app.get(
+  "/control.html",
+  (req, res, next) => {
+    const publicControl = path.join(
+      __dirname,
+      "public",
+      "control.html"
+    );
 
-  const rootControl = path.join(
-    __dirname,
-    "control.html"
-  );
+    const rootControl = path.join(
+      __dirname,
+      "control.html"
+    );
 
-  if (fs.existsSync(publicControl)) {
-    return res.sendFile(publicControl);
+    if (fs.existsSync(publicControl)) {
+      return res.sendFile(
+        publicControl
+      );
+    }
+
+    if (fs.existsSync(rootControl)) {
+      return res.sendFile(
+        rootControl
+      );
+    }
+
+    next();
   }
-
-  if (fs.existsSync(rootControl)) {
-    return res.sendFile(rootControl);
-  }
-
-  next();
-});
+);
 
 /* =========================
    ملف البروتوكول
@@ -75,16 +99,17 @@ if (!fs.existsSync(PROTO_PATH)) {
   );
 }
 
-const packageDefinition = protoLoader.loadSync(
-  PROTO_PATH,
-  {
-    keepCase: false,
-    longs: String,
-    enums: String,
-    defaults: true,
-    oneofs: true
-  }
-);
+const packageDefinition =
+  protoLoader.loadSync(
+    PROTO_PATH,
+    {
+      keepCase: false,
+      longs: String,
+      enums: String,
+      defaults: true,
+      oneofs: true
+    }
+  );
 
 const youtubeProto =
   grpc.loadPackageDefinition(
@@ -99,6 +124,8 @@ const state = {
   active: false,
 
   broadcastId: "",
+
+  // يتم حفظ chatId حتى لا نعيد طلبه
   chatId: "",
 
   keyword: "ارواح!",
@@ -111,15 +138,21 @@ const state = {
 
   streamCall: null,
 
-  // آخر نقطة وصلنا إليها في Live Chat
-  nextPageToken: "",
-
   competitionStartedAt: 0,
 
   status: "متوقف",
 
-  // يمنع إنشاء أكثر من اتصال في نفس الوقت
-  reconnecting: false
+  // يمنع تشغيل أكثر من اتصال
+  reconnecting: false,
+
+  // عدد محاولات إعادة الاتصال
+  reconnectAttempts: 0,
+
+  // مؤقت إعادة الاتصال
+  reconnectTimer: null,
+
+  // يمنع إعادة البحث عن البث
+  broadcastLookupDone: false
 };
 
 /* =========================
@@ -130,20 +163,31 @@ function publicState() {
   return {
     active: state.active,
 
-    broadcastId: state.broadcastId,
+    broadcastId:
+      state.broadcastId,
 
-    keyword: state.keyword,
+    keyword:
+      state.keyword,
 
-    participants: state.participants.map((p) => ({
-      youtubeName: p.youtubeName,
-      comment: p.comment
-    })),
+    participants:
+      state.participants.map(
+        (p) => ({
+          youtubeName:
+            p.youtubeName,
 
-    queued: state.queue.length,
+          comment:
+            p.comment
+        })
+      ),
 
-    historyCount: state.history.size,
+    queued:
+      state.queue.length,
 
-    status: state.status
+    historyCount:
+      state.history.size,
+
+    status:
+      state.status
   };
 }
 
@@ -152,13 +196,19 @@ function publicState() {
 ========================= */
 
 function broadcast() {
-  const data = JSON.stringify({
-    type: "state",
-    state: publicState()
-  });
+  const data =
+    JSON.stringify({
+      type: "state",
+      state: publicState()
+    });
 
-  for (const client of wss.clients) {
-    if (client.readyState === WebSocket.OPEN) {
+  for (
+    const client of wss.clients
+  ) {
+    if (
+      client.readyState ===
+      WebSocket.OPEN
+    ) {
       try {
         client.send(data);
       } catch (err) {
@@ -175,7 +225,10 @@ function broadcast() {
    تنظيف النصوص
 ========================= */
 
-function cleanText(value, maxLength = 500) {
+function cleanText(
+  value,
+  maxLength = 500
+) {
   return String(value || "")
     .replace(/\s+/g, " ")
     .trim()
@@ -192,31 +245,46 @@ function normalized(value) {
    فحص كلمة التسجيل
 ========================= */
 
-function registrationComment(text) {
-  const comment = cleanText(text);
+function registrationComment(
+  text
+) {
+  const comment =
+    cleanText(text);
 
-  const keyword = cleanText(
-    state.keyword,
-    100
-  );
+  const keyword =
+    cleanText(
+      state.keyword,
+      100
+    );
 
-  if (!comment || !keyword) {
+  if (
+    !comment ||
+    !keyword
+  ) {
     return null;
   }
 
-  const c = normalized(comment);
-  const k = normalized(keyword);
+  const c =
+    normalized(comment);
+
+  const k =
+    normalized(keyword);
 
   if (!c.startsWith(k)) {
     return null;
   }
 
-  const next = comment.charAt(
-    keyword.length
-  );
+  const next =
+    comment.charAt(
+      keyword.length
+    );
 
-  // يجب أن تكون هناك مسافة بعد كلمة التسجيل
-  if (next && !/\s/.test(next)) {
+  // يجب أن تكون هناك مسافة
+  // بعد كلمة التسجيل
+  if (
+    next &&
+    !/\s/.test(next)
+  ) {
     return null;
   }
 
@@ -232,25 +300,34 @@ function addParticipant(
   userId,
   comment
 ) {
-  const youtubeName = cleanText(
-    displayName,
-    100
-  );
+  const youtubeName =
+    cleanText(
+      displayName,
+      100
+    );
 
-  const fullComment = cleanText(
-    comment,
-    500
-  );
+  const fullComment =
+    cleanText(
+      comment,
+      500
+    );
 
-  if (!youtubeName || !fullComment) {
+  if (
+    !youtubeName ||
+    !fullComment
+  ) {
     return false;
   }
 
   const key = userId
     ? `id:${userId}`
-    : `name:${normalized(youtubeName)}`;
+    : `name:${normalized(
+        youtubeName
+      )}`;
 
-  if (state.history.has(key)) {
+  if (
+    state.history.has(key)
+  ) {
     return false;
   }
 
@@ -262,7 +339,10 @@ function addParticipant(
     key
   };
 
-  if (state.participants.length < 40) {
+  if (
+    state.participants
+      .length < 40
+  ) {
     state.participants.push(
       participant
     );
@@ -283,7 +363,8 @@ function addParticipant(
 
 function fillFromQueue() {
   while (
-    state.participants.length < 40 &&
+    state.participants
+      .length < 40 &&
     state.queue.length > 0
   ) {
     state.participants.push(
@@ -296,16 +377,22 @@ function fillFromQueue() {
    حذف مشارك
 ========================= */
 
-function deleteParticipant(index) {
+function deleteParticipant(
+  index
+) {
   if (
     !Number.isInteger(index) ||
     index < 0 ||
-    index >= state.participants.length
+    index >=
+      state.participants.length
   ) {
     return;
   }
 
-  state.participants.splice(index, 1);
+  state.participants.splice(
+    index,
+    1
+  );
 
   fillFromQueue();
 
@@ -317,18 +404,42 @@ function deleteParticipant(index) {
 ========================= */
 
 function stopStream() {
-  state.reconnecting = false;
+  state.reconnecting =
+    false;
 
-  if (state.streamCall) {
+  state.reconnectAttempts =
+    0;
+
+  if (
+    state.reconnectTimer
+  ) {
+    clearTimeout(
+      state.reconnectTimer
+    );
+
+    state.reconnectTimer =
+      null;
+  }
+
+  if (
+    state.streamCall
+  ) {
     try {
       state.streamCall.cancel();
     } catch (_) {}
 
-    state.streamCall = null;
+    state.streamCall =
+      null;
   }
 
-  // المسابقة الجديدة تبدأ من نقطة جديدة
-  state.nextPageToken = "";
+  /*
+   * مهم:
+   * لا نحذف chatId هنا.
+   *
+   * إذا كانت المسابقة نفسها
+   * تعيد الاتصال، نستعمل نفس chatId
+   * بدون طلب جديد إلى YouTube.
+   */
 }
 
 /* =========================
@@ -343,21 +454,25 @@ function getConfig() {
       "client_secret.json"
     );
 
-  if (!fs.existsSync(credsPath)) {
+  if (
+    !fs.existsSync(credsPath)
+  ) {
     throw new Error(
       "ضع ملف client_secret.json داخل إعدادات Render كـ Secret File أو اضبط GOOGLE_CLIENT_SECRET."
     );
   }
 
-  const creds = JSON.parse(
-    fs.readFileSync(
-      credsPath,
-      "utf8"
-    )
-  );
+  const creds =
+    JSON.parse(
+      fs.readFileSync(
+        credsPath,
+        "utf8"
+      )
+    );
 
   const config =
-    creds.installed || creds.web;
+    creds.installed ||
+    creds.web;
 
   if (!config) {
     throw new Error(
@@ -369,7 +484,16 @@ function getConfig() {
 }
 
 function makeOAuthClient() {
-  const config = getConfig();
+  const config =
+    getConfig();
+
+  /*
+   * في Render نستخدم REDIRECT_URI
+   * الموجود في Environment Variables.
+   *
+   * القيمة الصحيحة:
+   * https://live-spirits-board.onrender.com/oauth2callback
+   */
 
   const redirectUri =
     process.env.REDIRECT_URI ||
@@ -397,7 +521,9 @@ async function getYouTubeClient() {
       "token.json"
     );
 
-  if (!fs.existsSync(tokenPath)) {
+  if (
+    !fs.existsSync(tokenPath)
+  ) {
     throw new Error(
       "الحساب غير مربوط. اضغط «🔗 ربط حساب YouTube» أولاً."
     );
@@ -413,10 +539,11 @@ async function getYouTubeClient() {
   );
 
   return {
-    youtube: google.youtube({
-      version: "v3",
-      auth: oauth2
-    }),
+    youtube:
+      google.youtube({
+        version: "v3",
+        auth: oauth2
+      }),
 
     oauth2
   };
@@ -426,47 +553,54 @@ async function getYouTubeClient() {
    بدء OAuth
 ========================= */
 
-app.get("/api/auth", (req, res) => {
-  try {
-    const oauth2 =
-      makeOAuthClient();
+app.get(
+  "/api/auth",
+  (req, res) => {
+    try {
+      const oauth2 =
+        makeOAuthClient();
 
-    const url =
-      oauth2.generateAuthUrl({
-        access_type: "offline",
+      const url =
+        oauth2.generateAuthUrl({
+          access_type:
+            "offline",
 
-        scope: [
-          "https://www.googleapis.com/auth/youtube.readonly"
-        ],
+          scope: [
+            "https://www.googleapis.com/auth/youtube.readonly"
+          ],
 
-        prompt: "consent"
-      });
+          prompt: "consent"
+        });
 
-    res.redirect(url);
-  } catch (e) {
-    console.error(
-      "❌ OAuth start error:",
-      e
-    );
-
-    res
-      .status(500)
-      .send(
-        "تعذر بدء ربط YouTube: " +
-          e.message
+      res.redirect(url);
+    } catch (e) {
+      console.error(
+        "❌ OAuth start error:",
+        e
       );
+
+      res
+        .status(500)
+        .send(
+          "تعذر بدء ربط YouTube: " +
+            e.message
+        );
+    }
   }
-});
+);
 
 /* =========================
    API State
 ========================= */
 
-app.get("/api/state", (req, res) => {
-  res.json(
-    publicState()
-  );
-});
+app.get(
+  "/api/state",
+  (req, res) => {
+    res.json(
+      publicState()
+    );
+  }
+);
 
 /* =========================
    إعدادات المسابقة
@@ -481,10 +615,29 @@ app.post(
         "broadcastId"
       )
     ) {
-      state.broadcastId =
+      const newBroadcastId =
         String(
-          req.body.broadcastId || ""
+          req.body.broadcastId ||
+            ""
         ).trim();
+
+      /*
+       * إذا تغير Broadcast ID
+       * يجب مسح chatId القديم.
+       */
+
+      if (
+        newBroadcastId !==
+        state.broadcastId
+      ) {
+        state.chatId = "";
+
+        state.broadcastLookupDone =
+          false;
+      }
+
+      state.broadcastId =
+        newBroadcastId;
     }
 
     if (
@@ -517,7 +670,8 @@ app.post(
 
     res.json({
       ok: true,
-      state: publicState()
+      state:
+        publicState()
     });
   }
 );
@@ -532,21 +686,45 @@ app.post(
     try {
       stopStream();
 
-      state.participants = [];
+      state.participants =
+        [];
 
       state.history =
         new Set();
 
-      state.queue = [];
+      state.queue =
+        [];
 
-      if (req.body.broadcastId) {
-        state.broadcastId =
+      /*
+       * إذا أرسل المستخدم Broadcast ID
+       * جديدًا، نحدثه ونمسح chatId القديم.
+       */
+
+      if (
+        req.body.broadcastId
+      ) {
+        const newBroadcastId =
           String(
             req.body.broadcastId
           ).trim();
+
+        if (
+          newBroadcastId !==
+          state.broadcastId
+        ) {
+          state.broadcastId =
+            newBroadcastId;
+
+          state.chatId = "";
+
+          state.broadcastLookupDone =
+            false;
+        }
       }
 
-      if (req.body.keyword) {
+      if (
+        req.body.keyword
+      ) {
         state.keyword =
           cleanText(
             req.body.keyword,
@@ -554,17 +732,26 @@ app.post(
           );
       }
 
-      if (!state.keyword) {
+      if (
+        !state.keyword
+      ) {
         throw new Error(
           "اكتب كلمة التسجيل أولًا."
         );
       }
 
-      // بداية مسابقة جديدة
+      /*
+       * بداية مسابقة جديدة
+       */
+
       state.competitionStartedAt =
         Date.now();
 
-      state.active = true;
+      state.active =
+        true;
+
+      state.reconnectAttempts =
+        0;
 
       state.status =
         "يستعد لقراءة الشات...";
@@ -577,7 +764,8 @@ app.post(
 
       res.json({
         ok: true,
-        state: publicState()
+        state:
+          publicState()
       });
     } catch (e) {
       console.error(
@@ -585,9 +773,11 @@ app.post(
         e
       );
 
-      state.active = false;
+      state.active =
+        false;
 
-      state.status = "خطأ";
+      state.status =
+        "خطأ";
 
       stopStream();
 
@@ -597,7 +787,8 @@ app.post(
         .status(400)
         .json({
           ok: false,
-          error: e.message
+          error:
+            e.message
         });
     }
   }
@@ -610,7 +801,8 @@ app.post(
 app.post(
   "/api/stop",
   (req, res) => {
-    state.active = false;
+    state.active =
+      false;
 
     state.status =
       "متوقف";
@@ -621,7 +813,8 @@ app.post(
 
     res.json({
       ok: true,
-      state: publicState()
+      state:
+        publicState()
     });
   }
 );
@@ -641,7 +834,8 @@ app.post(
 
     res.json({
       ok: true,
-      state: publicState()
+      state:
+        publicState()
     });
   }
 );
@@ -653,29 +847,38 @@ app.post(
 app.post(
   "/api/reset",
   (req, res) => {
-    state.active = false;
+    state.active =
+      false;
 
     state.status =
       "متوقف";
 
     stopStream();
 
-    state.participants = [];
+    state.participants =
+      [];
 
     state.history =
       new Set();
 
-    state.queue = [];
+    state.queue =
+      [];
 
-    state.nextPageToken = "";
+    state.competitionStartedAt =
+      0;
 
-    state.competitionStartedAt = 0;
+    /*
+     * نحتفظ بـ broadcastId و chatId
+     * حتى لا نحتاج طلب YouTube جديد
+     * بدون سبب.
+     */
 
     broadcast();
 
     res.json({
       ok: true,
-      state: publicState()
+      state:
+        publicState()
     });
   }
 );
@@ -688,7 +891,9 @@ app.get(
   "/oauth2callback",
   async (req, res) => {
     try {
-      if (req.query.error) {
+      if (
+        req.query.error
+      ) {
         return res
           .status(400)
           .send(
@@ -697,7 +902,9 @@ app.get(
           );
       }
 
-      if (!req.query.code) {
+      if (
+        !req.query.code
+      ) {
         return res
           .status(400)
           .send(
@@ -792,12 +999,41 @@ app.get(
 async function findLiveChat(
   youtube
 ) {
-  if (state.broadcastId) {
+  /*
+   * أهم تعديل:
+   *
+   * إذا كان لدينا chatId بالفعل،
+   * لا نرسل أي طلب جديد إلى YouTube.
+   */
+
+  if (
+    state.chatId
+  ) {
+    console.log(
+      "♻️ استخدام Live Chat ID المحفوظ."
+    );
+
+    return state.chatId;
+  }
+
+  /*
+   * إذا كان لدينا Broadcast ID
+   * نبحث عنه مرة واحدة فقط.
+   */
+
+  if (
+    state.broadcastId
+  ) {
+    console.log(
+      "🔎 البحث عن Live Chat للبث..."
+    );
+
     const b =
       await youtube.liveBroadcasts.list(
         {
           part:
             "snippet,status",
+
           id: [
             state.broadcastId
           ]
@@ -805,7 +1041,10 @@ async function findLiveChat(
       );
 
     const item =
-      (b.data.items || [])[0];
+      (
+        b.data.items ||
+        []
+      )[0];
 
     if (!item) {
       throw new Error(
@@ -814,17 +1053,46 @@ async function findLiveChat(
     }
 
     if (
-      !item.snippet?.liveChatId
+      !item.snippet
+        ?.liveChatId
     ) {
       throw new Error(
         "لم أجد Live Chat لهذا البث."
       );
     }
 
-    return (
-      item.snippet.liveChatId
+    state.chatId =
+      item.snippet.liveChatId;
+
+    state.broadcastLookupDone =
+      true;
+
+    console.log(
+      "✅ تم حفظ Live Chat ID."
+    );
+
+    return state.chatId;
+  }
+
+  /*
+   * إذا لم يضع المستخدم Broadcast ID،
+   * نبحث عن بث مباشر يملكه الحساب.
+   *
+   * هذه العملية لا تتكرر عند reconnect
+   * لأن chatId سيتم حفظه بعد نجاحها.
+   */
+
+  if (
+    state.broadcastLookupDone
+  ) {
+    throw new Error(
+      "تعذر العثور على Live Chat."
     );
   }
+
+  console.log(
+    "🔎 البحث عن بث مباشر نشط..."
+  );
 
   const r =
     await youtube.liveBroadcasts.list(
@@ -839,7 +1107,10 @@ async function findLiveChat(
     );
 
   const active =
-    (r.data.items || []).find(
+    (
+      r.data.items ||
+      []
+    ).find(
       (item) =>
         item.status
           ?.lifeCycleStatus ===
@@ -856,15 +1127,49 @@ async function findLiveChat(
     active.id;
 
   if (
-    !active.snippet?.liveChatId
+    !active.snippet
+      ?.liveChatId
   ) {
     throw new Error(
       "لم أجد Live Chat لهذا البث."
     );
   }
 
+  state.chatId =
+    active.snippet.liveChatId;
+
+  state.broadcastLookupDone =
+    true;
+
+  console.log(
+    "✅ تم العثور على Live Chat وحفظه."
+  );
+
+  return state.chatId;
+}
+
+/* =========================
+   معرفة خطأ الحصة
+========================= */
+
+function isQuotaError(
+  err
+) {
+  const text =
+    JSON.stringify(err || {})
+      .toLowerCase();
+
   return (
-    active.snippet.liveChatId
+    text.includes(
+      "quotaexceeded"
+    ) ||
+    text.includes(
+      "quota exceeded"
+    ) ||
+    text.includes(
+      "resource_exhausted"
+    ) ||
+    err?.code === 8
   );
 }
 
@@ -873,11 +1178,16 @@ async function findLiveChat(
 ========================= */
 
 async function startStreaming() {
-  if (!state.active) {
+  if (
+    !state.active
+  ) {
     return;
   }
 
-  // منع تشغيل اتصال ثانٍ بالخطأ
+  /*
+   * منع تشغيل اتصالين
+   */
+
   if (
     state.streamCall ||
     state.reconnecting
@@ -890,6 +1200,11 @@ async function startStreaming() {
     oauth2
   } =
     await getYouTubeClient();
+
+  /*
+   * findLiveChat لن يرسل طلبًا
+   * جديدًا إذا كان chatId محفوظًا.
+   */
 
   state.chatId =
     await findLiveChat(
@@ -911,10 +1226,11 @@ async function startStreaming() {
   }
 
   const client =
-    new youtubeProto.V3DataLiveChatMessageService(
-      "youtube.googleapis.com:443",
-      grpc.credentials.createSsl()
-    );
+    new youtubeProto
+      .V3DataLiveChatMessageService(
+        "youtube.googleapis.com:443",
+        grpc.credentials.createSsl()
+      );
 
   const metadata =
     new grpc.Metadata();
@@ -923,6 +1239,12 @@ async function startStreaming() {
     "authorization",
     `Bearer ${accessToken}`
   );
+
+  /*
+   * Streaming Live Chat
+   *
+   * لا يوجد polling كل ثانية.
+   */
 
   const request = {
     liveChatId:
@@ -934,12 +1256,6 @@ async function startStreaming() {
       "authorDetails"
     ]
   };
-
-  // استكمال القراءة من آخر نقطة
-  if (state.nextPageToken) {
-    request.pageToken =
-      state.nextPageToken;
-  }
 
   console.log(
     "▶️ بدء الاتصال بـ YouTube Live Chat..."
@@ -956,6 +1272,9 @@ async function startStreaming() {
 
   state.reconnecting =
     false;
+
+  state.reconnectAttempts =
+    0;
 
   state.status =
     "متصل بالشات ويستقبل الرسائل الجديدة";
@@ -976,18 +1295,13 @@ async function startStreaming() {
         return;
       }
 
-      // حفظ آخر صفحة
-      if (
-        response.nextPageToken
-      ) {
-        state.nextPageToken =
-          response.nextPageToken;
-      }
-
       const items =
-        response.items || [];
+        response.items ||
+        [];
 
-      for (const m of items) {
+      for (
+        const m of items
+      ) {
         const publishedAt =
           m.snippet
             ?.publishedAt;
@@ -999,7 +1313,10 @@ async function startStreaming() {
               )
             : NaN;
 
-        // تجاهل الرسائل القديمة
+        /*
+         * تجاهل الرسائل القديمة
+         */
+
         if (
           Number.isFinite(
             publishedMs
@@ -1075,6 +1392,25 @@ async function startStreaming() {
       state.streamCall =
         null;
 
+      /*
+       * إذا كانت المشكلة حصة،
+       * لا نبدأ حلقة reconnect سريعة.
+       */
+
+      if (
+        isQuotaError(err)
+      ) {
+        state.status =
+          "تم إيقاف إعادة المحاولة بسبب مشكلة في حصة YouTube.";
+
+        state.active =
+          false;
+
+        broadcast();
+
+        return;
+      }
+
       scheduleReconnect();
     }
   );
@@ -1106,7 +1442,7 @@ async function startStreaming() {
 }
 
 /* =========================
-   إعادة الاتصال
+   إعادة الاتصال الآمنة
 ========================= */
 
 function scheduleReconnect() {
@@ -1117,50 +1453,128 @@ function scheduleReconnect() {
     return;
   }
 
+  /*
+   * لا نسمح بأكثر من مؤقت.
+   */
+
+  if (
+    state.reconnectTimer
+  ) {
+    return;
+  }
+
   state.reconnecting =
     true;
 
+  state.reconnectAttempts++;
+
+  /*
+   * Backoff:
+   *
+   * 1 محاولة بعد 2 ثواني
+   * ثم 4
+   * ثم 8
+   * ثم 16
+   * ثم 30 كحد أقصى
+   *
+   * هذا يمنع ضرب API
+   * بعشرات الطلبات في الثانية.
+   */
+
+  const delay =
+    Math.min(
+      30000,
+      2000 *
+        Math.pow(
+          2,
+          Math.min(
+            state.reconnectAttempts -
+              1,
+            4
+          )
+        )
+    );
+
   state.status =
-    "إعادة الاتصال...";
+    `انقطع الاتصال، إعادة المحاولة بعد ${Math.ceil(
+      delay / 1000
+    )} ثانية...`;
 
   broadcast();
 
-  setTimeout(
-    async () => {
-      state.reconnecting =
-        false;
+  console.log(
+    `🔄 إعادة الاتصال بعد ${
+      delay / 1000
+    } ثانية...`
+  );
 
-      if (!state.active) {
-        return;
-      }
+  state.reconnectTimer =
+    setTimeout(
+      async () => {
+        state.reconnectTimer =
+          null;
 
-      try {
-        await startStreaming();
-      } catch (e) {
-        console.error(
-          "❌ Reconnect failed:",
-          e
-        );
+        state.reconnecting =
+          false;
 
-        state.status =
-          "تعذر الاتصال، ستتم إعادة المحاولة...";
+        if (
+          !state.active
+        ) {
+          return;
+        }
 
-        broadcast();
+        try {
+          /*
+           * مهم:
+           *
+           * startStreaming()
+           * سيستخدم chatId المحفوظ.
+           *
+           * لن يستدعي
+           * liveBroadcasts.list
+           * مرة أخرى.
+           */
 
-        // محاولة أخرى بعد 5 ثوانٍ
-        setTimeout(() => {
+          await startStreaming();
+
+          console.log(
+            "✅ تمت إعادة الاتصال بنجاح."
+          );
+        } catch (e) {
+          console.error(
+            "❌ Reconnect failed:",
+            e
+          );
+
+          /*
+           * إذا كان الخطأ quotaExceeded
+           * نوقف المحاولات.
+           */
+
           if (
-            !state.active
+            isQuotaError(e)
           ) {
+            state.active =
+              false;
+
+            state.status =
+              "تم إيقاف الاتصال بسبب استنفاد حصة YouTube.";
+
+            broadcast();
+
             return;
           }
 
+          state.status =
+            "تعذر الاتصال، ستتم إعادة المحاولة...";
+
+          broadcast();
+
           scheduleReconnect();
-        }, 5000);
-      }
-    },
-    1000
-  );
+        }
+      },
+      delay
+    );
 }
 
 /* =========================
@@ -1177,7 +1591,8 @@ wss.on(
     ws.send(
       JSON.stringify({
         type: "state",
-        state: publicState()
+        state:
+          publicState()
       })
     );
 
