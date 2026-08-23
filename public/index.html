@@ -1,36 +1,406 @@
 <!doctype html>
 <html lang="ar" dir="rtl">
+
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>جدول المشاركين</title>
+
+<title>شاشة فعالية الأرواح</title>
+
 <style>
-html,body{margin:0;width:100%;height:100%;background:transparent;overflow:hidden}
-body{font-family:Arial,sans-serif;display:flex;align-items:center;justify-content:center}
-.board{width:min(900px,90vw);display:flex;flex-direction:column;gap:8px}
-.row{height:60px;display:grid;grid-template-columns:65px 1fr;direction:ltr}
-.num,.name{display:flex;align-items:center;box-sizing:border-box;border:2px solid rgba(255,255,255,.32);background:rgba(12,16,22,.62);backdrop-filter:blur(5px);color:#fff;box-shadow:0 4px 18px rgba(0,0,0,.22)}
-.num{justify-content:center;font-size:22px;font-weight:900;border-radius:15px 0 0 15px}
-.name{direction:rtl;justify-content:flex-start;padding:0 20px;font-size:24px;font-weight:800;border-radius:0 15px 15px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-</style>
-</head>
-<body>
-<div class="board" id="board"></div>
-<script>
-function render(s){
- const board=document.getElementById('board');board.innerHTML='';
- const participants=s.participants||[];
- participants.forEach((p,i)=>{
-   const row=document.createElement('div');row.className='row';
-   const num=document.createElement('div');num.className='num';num.textContent=i+1;
-   const name=document.createElement('div');name.className='name';name.textContent=p.youtubeName||'';
-   row.append(num,name);board.append(row);
- });
+
+html,
+body{
+  margin:0;
+  width:100%;
+  height:100%;
+  background:transparent;
+  overflow:hidden;
 }
-fetch('/api/state').then(r=>r.json()).then(render);
-const wsProtocol=location.protocol==='https:'?'wss:':'ws:';
-const ws=new WebSocket(`${wsProtocol}//${location.host}`);
-ws.onmessage=e=>{const d=JSON.parse(e.data);if(d.type==='state')render(d.state)};
+
+body{
+  font-family:Arial,sans-serif;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+
+.board{
+  width:min(900px,90vw);
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+}
+
+.row{
+  height:60px;
+
+  display:grid;
+
+  grid-template-columns:65px 1fr;
+
+  direction:ltr;
+}
+
+.num,
+.name{
+
+  display:flex;
+
+  align-items:center;
+
+  box-sizing:border-box;
+
+  border:2px solid rgba(255,255,255,.32);
+
+  background:rgba(12,16,22,.62);
+
+  backdrop-filter:blur(5px);
+
+  color:#fff;
+
+  box-shadow:
+    0 4px 18px rgba(0,0,0,.22);
+}
+
+.num{
+
+  justify-content:center;
+
+  font-size:22px;
+
+  font-weight:900;
+
+  border-radius:
+    15px 0 0 15px;
+}
+
+.name{
+
+  direction:rtl;
+
+  justify-content:flex-start;
+
+  padding:0 20px;
+
+  font-size:24px;
+
+  font-weight:800;
+
+  border-radius:
+    0 15px 15px 0;
+
+  white-space:nowrap;
+
+  overflow:hidden;
+
+  text-overflow:ellipsis;
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div
+  class="board"
+  id="board"
+></div>
+
+
+<script>
+
+/* =========================================================
+   الحصول على معرف الغرفة من الرابط
+========================================================= */
+
+const pathParts =
+  window.location.pathname
+    .split("/")
+    .filter(Boolean);
+
+
+/*
+  الرابط يكون:
+
+  /obs/ROOM_ID
+*/
+
+const ROOM_ID =
+  pathParts.length >= 2 &&
+  pathParts[0] === "obs"
+    ? pathParts[1]
+    : null;
+
+
+/* =========================================================
+   إذا لم يوجد Room ID
+========================================================= */
+
+if (!ROOM_ID) {
+
+  document.body.innerHTML = `
+    <div style="
+      color:white;
+      font-family:Arial,sans-serif;
+      text-align:center;
+      padding:30px;
+    ">
+      ❌ رابط OBS غير صالح
+    </div>
+  `;
+
+  throw new Error(
+    "OBS room ID missing"
+  );
+
+}
+
+
+/* =========================================================
+   رسم المشاركين
+========================================================= */
+
+function render(state){
+
+  const board =
+    document.getElementById(
+      "board"
+    );
+
+  board.innerHTML = "";
+
+  const participants =
+    state?.participants || [];
+
+
+  /*
+    نعرض المشاركين الموجودين فقط.
+  */
+
+  participants.forEach(
+    (participant,index) => {
+
+      const row =
+        document.createElement(
+          "div"
+        );
+
+      row.className =
+        "row";
+
+
+      const num =
+        document.createElement(
+          "div"
+        );
+
+      num.className =
+        "num";
+
+      num.textContent =
+        index + 1;
+
+
+      const name =
+        document.createElement(
+          "div"
+        );
+
+      name.className =
+        "name";
+
+      name.textContent =
+        participant.youtubeName ||
+        "";
+
+
+      row.appendChild(
+        num
+      );
+
+      row.appendChild(
+        name
+      );
+
+      board.appendChild(
+        row
+      );
+
+    }
+  );
+
+}
+
+
+/* =========================================================
+   تحميل حالة الغرفة
+========================================================= */
+
+async function loadRoom(){
+
+  try{
+
+    const response =
+      await fetch(
+        `/api/rooms/${encodeURIComponent(
+          ROOM_ID
+        )}`
+      );
+
+
+    const data =
+      await response.json();
+
+
+    if(
+      !response.ok ||
+      !data.ok
+    ){
+
+      console.error(
+        data.error ||
+        "Room error"
+      );
+
+      return;
+
+    }
+
+
+    render(
+      data.room
+    );
+
+
+  }catch(error){
+
+    console.error(
+      "Failed to load room:",
+      error
+    );
+
+  }
+
+}
+
+
+/* =========================================================
+   WebSocket
+========================================================= */
+
+let ws = null;
+
+
+function connectWebSocket(){
+
+  const protocol =
+    location.protocol === "https:"
+      ? "wss:"
+      : "ws:";
+
+
+  const url =
+    `${protocol}//${location.host}/ws?room=${encodeURIComponent(
+      ROOM_ID
+    )}`;
+
+
+  ws =
+    new WebSocket(
+      url
+    );
+
+
+  ws.onopen = () => {
+
+    console.log(
+      "🔌 OBS WebSocket connected"
+    );
+
+  };
+
+
+  ws.onmessage =
+    (event) => {
+
+      try{
+
+        const data =
+          JSON.parse(
+            event.data
+          );
+
+
+        if(
+          data.type === "state"
+        ){
+
+          render(
+            data.state
+          );
+
+        }
+
+      }catch(error){
+
+        console.error(
+          "OBS WebSocket message error:",
+          error
+        );
+
+      }
+
+    };
+
+
+  ws.onerror =
+    (error) => {
+
+      console.error(
+        "OBS WebSocket error:",
+        error
+      );
+
+    };
+
+
+  ws.onclose = () => {
+
+    console.log(
+      "🔌 OBS WebSocket disconnected"
+    );
+
+
+    /*
+      إعادة الاتصال تلقائيًا.
+    */
+
+    setTimeout(
+      () => {
+
+        connectWebSocket();
+
+      },
+      3000
+    );
+
+  };
+
+}
+
+
+/* =========================================================
+   تشغيل
+========================================================= */
+
+loadRoom();
+
+connectWebSocket();
+
 </script>
+
 </body>
+
 </html>
