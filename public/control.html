@@ -4,95 +4,1308 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>لوحة تحكم فعالية الأرواح</title>
+
 <style>
-body{font-family:Arial,sans-serif;background:#101318;color:#fff;margin:0;padding:28px}
-.wrap{max-width:1000px;margin:auto}.card{background:#1b2028;border:1px solid #303743;border-radius:18px;padding:22px;margin-bottom:18px}
-h1{margin-top:0}.row{display:flex;gap:10px;flex-wrap:wrap}
-input,button{font:inherit;border-radius:10px;padding:11px 14px;border:1px solid #3a424e}
-input{background:#0f1318;color:#fff;min-width:260px}button{cursor:pointer;background:#2a313b;color:#fff}
-.start{background:#16834a}.stop{background:#a52d38}.danger{background:#7b222b}.save{background:#245a9c}
-.status{font-weight:bold}.muted{color:#aab3bf}
-.keywordBox{margin-top:18px;padding:16px;border-radius:14px;background:#11161c;border:1px solid #303743}
-.keywordBox label{display:block;margin-bottom:8px;font-weight:bold}.keywordBox input{width:calc(100% - 30px);min-width:0}
-.tableWrap{overflow-x:auto}table{width:100%;border-collapse:separate;border-spacing:0 8px}
-th{padding:10px;color:#aab3bf;text-align:right}td{padding:12px;background:#11161c;vertical-align:top}
-td:first-child{width:55px;text-align:center;border-radius:8px 0 0 8px}td:last-child{border-radius:0 8px 8px 0;width:90px}
-.number{font-weight:bold}.youtubeName{font-weight:bold}.comment{word-break:break-word;color:#dce2e9}.empty{color:#697482}.small{font-size:13px}
-.linkBox{margin-top:18px;padding:14px;background:#11161c;border:1px solid #303743;border-radius:14px}
-.linkBox input{width:calc(100% - 30px);min-width:0}
+*{
+  box-sizing:border-box;
+}
+
+body{
+  font-family:Arial,sans-serif;
+  background:#101318;
+  color:#fff;
+  margin:0;
+  padding:24px;
+}
+
+.wrap{
+  max-width:1050px;
+  margin:auto;
+}
+
+.card{
+  background:#1b2028;
+  border:1px solid #303743;
+  border-radius:18px;
+  padding:22px;
+  margin-bottom:18px;
+}
+
+h1,h2{
+  margin-top:0;
+}
+
+.row{
+  display:flex;
+  gap:10px;
+  flex-wrap:wrap;
+}
+
+input,button{
+  font:inherit;
+  border-radius:10px;
+  padding:11px 14px;
+  border:1px solid #3a424e;
+}
+
+input{
+  background:#0f1318;
+  color:#fff;
+  min-width:260px;
+}
+
+button{
+  cursor:pointer;
+  background:#2a313b;
+  color:#fff;
+}
+
+button:disabled{
+  opacity:.5;
+  cursor:not-allowed;
+}
+
+.start{
+  background:#16834a;
+}
+
+.stop{
+  background:#a52d38;
+}
+
+.danger{
+  background:#7b222b;
+}
+
+.save{
+  background:#245a9c;
+}
+
+.restream{
+  background:#7547b8;
+}
+
+.status{
+  font-weight:bold;
+}
+
+.muted{
+  color:#aab3bf;
+}
+
+.small{
+  font-size:13px;
+}
+
+.keywordBox,
+.linkBox,
+.roomBox{
+  margin-top:18px;
+  padding:16px;
+  border-radius:14px;
+  background:#11161c;
+  border:1px solid #303743;
+}
+
+.keywordBox label{
+  display:block;
+  margin-bottom:8px;
+  font-weight:bold;
+}
+
+.keywordBox input,
+.linkBox input{
+  width:calc(100% - 30px);
+  min-width:0;
+}
+
+.linkTitle{
+  font-weight:bold;
+  margin-bottom:8px;
+}
+
+.statusBox{
+  padding:14px;
+  border-radius:12px;
+  background:#11161c;
+  border:1px solid #303743;
+  margin-top:15px;
+}
+
+.statusDot{
+  display:inline-block;
+  width:10px;
+  height:10px;
+  border-radius:50%;
+  background:#777;
+  margin-left:7px;
+}
+
+.tableWrap{
+  overflow-x:auto;
+}
+
+table{
+  width:100%;
+  border-collapse:separate;
+  border-spacing:0 8px;
+}
+
+th{
+  padding:10px;
+  color:#aab3bf;
+  text-align:right;
+}
+
+td{
+  padding:12px;
+  background:#11161c;
+  vertical-align:top;
+}
+
+td:first-child{
+  width:55px;
+  text-align:center;
+  border-radius:8px 0 0 8px;
+}
+
+td:last-child{
+  border-radius:0 8px 8px 0;
+  width:90px;
+}
+
+.number{
+  font-weight:bold;
+}
+
+.name{
+  font-weight:bold;
+}
+
+.comment{
+  word-break:break-word;
+  color:#dce2e9;
+}
+
+.empty{
+  color:#697482;
+}
+
+.notice{
+  padding:12px 14px;
+  border-radius:10px;
+  background:#202630;
+  color:#dce2e9;
+  margin-top:12px;
+}
+
+.hidden{
+  display:none;
+}
+
+@media(max-width:600px){
+  body{
+    padding:12px;
+  }
+
+  .card{
+    padding:16px;
+  }
+
+  input{
+    width:100%;
+    min-width:0;
+  }
+
+  button{
+    width:100%;
+  }
+
+  .row{
+    flex-direction:column;
+  }
+}
 </style>
 </head>
+
 <body>
+
 <div class="wrap">
-<div class="card">
-<h1>🎮 لوحة تحكم فعالية الأرواح</h1>
-<p class="muted">المسابقة تبدأ من الرسائل الجديدة بعد الضغط على «بداية». الرسائل القديمة لا تدخل.</p>
-<div class="row">
-<input id="broadcastId" placeholder="Broadcast ID (اختياري إذا عندك بث نشط)">
-<button class="save" onclick="saveConfig()">💾 حفظ</button>
+
+  <!-- =====================================================
+       الرأس
+  ====================================================== -->
+
+  <div class="card">
+
+    <h1>🎮 لوحة تحكم فعالية الأرواح</h1>
+
+    <p class="muted">
+      هذه الغرفة مستقلة عن باقي المستخدمين.
+      رسائل التسجيل التي تصل بعد الضغط على «بداية» فقط تدخل في المسابقة.
+    </p>
+
+    <div class="roomBox">
+
+      <div class="linkTitle">
+        🏠 معرف الغرفة
+      </div>
+
+      <div class="row">
+        <input id="roomId" readonly>
+        <button onclick="copyValue('roomId')">
+          📋 نسخ
+        </button>
+      </div>
+
+    </div>
+
+    <!-- ===================================================
+         حالة Restream
+    ==================================================== -->
+
+    <div class="statusBox">
+
+      <span id="statusDot" class="statusDot"></span>
+
+      <b>الحالة:</b>
+
+      <span id="status">
+        جاري التحميل...
+      </span>
+
+    </div>
+
+  </div>
+
+
+  <!-- =====================================================
+       Restream
+  ====================================================== -->
+
+  <div class="card">
+
+    <h2>🔗 ربط Restream</h2>
+
+    <p class="muted">
+      اربط حساب Restream بهذه الغرفة حتى يستطيع الموقع قراءة الشات.
+    </p>
+
+    <div class="row">
+
+      <button
+        id="connectButton"
+        class="restream"
+        onclick="connectRestream()"
+      >
+        🔗 ربط حساب Restream
+      </button>
+
+    </div>
+
+    <div id="restreamNotice" class="notice hidden">
+      تم ربط Restream. يمكنك الآن بدء المسابقة.
+    </div>
+
+  </div>
+
+
+  <!-- =====================================================
+       كلمة التسجيل
+  ====================================================== -->
+
+  <div class="card">
+
+    <h2>🔑 كلمة التسجيل</h2>
+
+    <p class="muted">
+      أي تعليق يبدأ بهذه الكلمة سيتم تسجيل صاحبه عند تشغيل المسابقة.
+    </p>
+
+    <div class="keywordBox">
+
+      <label>
+        كلمة التسجيل في الشات
+      </label>
+
+      <div class="row">
+
+        <input
+          id="keyword"
+          placeholder="مثال: ارواح!"
+          maxlength="100"
+        >
+
+        <button
+          class="save"
+          onclick="saveKeyword()"
+        >
+          💾 حفظ الكلمة
+        </button>
+
+      </div>
+
+      <p class="muted small">
+        مثال:
+        <b>ارواح! HASSAN397</b>
+      </p>
+
+    </div>
+
+  </div>
+
+
+  <!-- =====================================================
+       رابط OBS
+  ====================================================== -->
+
+  <div class="card">
+
+    <h2>🖥️ رابط شاشة OBS</h2>
+
+    <p class="muted">
+      هذا الرابط خاص بهذه الغرفة فقط.
+      ضعه داخل Browser Source في OBS.
+    </p>
+
+    <div class="linkBox">
+
+      <div class="linkTitle">
+        رابط OBS الخاص بالغرفة
+      </div>
+
+      <div class="row">
+
+        <input
+          id="obsUrl"
+          readonly
+        >
+
+        <button onclick="copyValue('obsUrl')">
+          📋 نسخ الرابط
+        </button>
+
+      </div>
+
+    </div>
+
+  </div>
+
+
+  <!-- =====================================================
+       التحكم
+  ====================================================== -->
+
+  <div class="card">
+
+    <h2>🎮 التحكم بالمسابقة</h2>
+
+    <div class="row">
+
+      <button
+        id="startButton"
+        class="start"
+        onclick="startCompetition()"
+      >
+        ▶ بداية — مسابقة جديدة
+      </button>
+
+      <button
+        id="stopButton"
+        class="stop"
+        onclick="stopCompetition()"
+      >
+        ⏹ توقف
+      </button>
+
+      <button
+        class="danger"
+        onclick="resetCompetition()"
+      >
+        🗑 مسح كل شيء
+      </button>
+
+      <button
+        class="danger"
+        onclick="logoutRoom()"
+      >
+        🚪 إنهاء الغرفة
+      </button>
+
+    </div>
+
+    <p>
+      المشاركون:
+      <b id="count">0</b>/40
+
+      |
+
+      الانتظار:
+      <b id="queue">0</b>
+    </p>
+
+  </div>
+
+
+  <!-- =====================================================
+       المشاركون
+  ====================================================== -->
+
+  <div class="card">
+
+    <h2>👥 المشاركون</h2>
+
+    <div class="tableWrap">
+
+      <table>
+
+        <thead>
+
+          <tr>
+            <th>#</th>
+            <th>اسم صاحب التعليق</th>
+            <th>التعليق الكامل</th>
+            <th></th>
+          </tr>
+
+        </thead>
+
+        <tbody id="rows"></tbody>
+
+      </table>
+
+    </div>
+
+  </div>
+
 </div>
-<div class="keywordBox">
-<label>🔑 كلمة التسجيل في الشات</label>
-<div class="row">
-<input id="keyword" placeholder="مثال: ارواح!">
-<button class="save" onclick="saveKeyword()">حفظ كلمة التسجيل</button>
-</div>
-<p class="muted small">يجب أن يبدأ التعليق بهذه الكلمة. مثال: <b>ارواح! HASSAN397 الذهبية</b></p>
-</div>
-<div class="linkBox">
-<b>🖥️ رابط شاشة OBS</b>
-<div class="row" style="margin-top:8px">
-<input id="obsUrl" readonly>
-<button onclick="copyObsUrl()">📋 نسخ الرابط</button>
-</div>
-<p class="muted small">ضع هذا الرابط في Browser Source داخل OBS عندما يكون الموقع منشورًا على الإنترنت.</p>
-</div>
-<br>
-<div class="row">
-<button class="start" onclick="start()">▶ بداية — مسابقة جديدة</button>
-<button onclick="connectYouTube()">🔗 ربط حساب YouTube</button>
-<button class="stop" onclick="stop()">⏹ توقف</button>
-<button class="danger" onclick="resetAll()">🗑 مسح كل شيء</button>
-</div>
-<p>الحالة: <span id="status" class="status">متوقف</span> | في الجدول: <span id="count">0</span>/40 | الانتظار: <span id="queue">0</span></p>
-</div>
-<div class="card">
-<h2>👥 المشاركون</h2>
-<div class="tableWrap"><table><thead><tr><th>#</th><th>اسم صاحب التعليق</th><th>التعليق الكامل</th><th></th></tr></thead><tbody id="rows"></tbody></table></div>
-</div>
-</div>
+
+
 <script>
-let ws;
-function render(s){
- document.getElementById('status').textContent=s.status||'متوقف';
- const participants=s.participants||[];
- document.getElementById('count').textContent=participants.length;
- document.getElementById('queue').textContent=s.queued||0;
- document.getElementById('broadcastId').value=s.broadcastId||'';
- document.getElementById('keyword').value=s.keyword||'';
- document.getElementById('obsUrl').value=`${location.origin}/display.html`;
- const rows=document.getElementById('rows');rows.innerHTML='';
- for(let i=0;i<40;i++){
-   const tr=document.createElement('tr'); const p=participants[i];
-   if(p){tr.innerHTML=`<td class="number">${i+1}</td><td class="youtubeName">${escapeHtml(p.youtubeName||'—')}</td><td class="comment">${escapeHtml(p.comment||'—')}</td><td><button onclick="del(${i})">حذف</button></td>`;}
-   else{tr.innerHTML=`<td class="number">${i+1}</td><td class="empty">—</td><td class="empty">—</td><td>—</td>`;}
-   rows.appendChild(tr);
- }
+
+/* =========================================================
+   متغيرات الغرفة
+========================================================= */
+
+const params =
+  new URLSearchParams(
+    window.location.search
+  );
+
+const ROOM_ID =
+  params.get("room");
+
+let ws = null;
+
+let currentState = null;
+
+
+/* =========================================================
+   التأكد من وجود الغرفة
+========================================================= */
+
+if (!ROOM_ID) {
+
+  document.body.innerHTML = `
+    <div style="
+      color:white;
+      background:#101318;
+      min-height:100vh;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      font-family:Arial,sans-serif;
+      text-align:center;
+      padding:30px;
+    ">
+      <div>
+        <h2>❌ معرف الغرفة غير موجود</h2>
+        <p>
+          افتح لوحة التحكم من الرابط الخاص بالغرفة.
+        </p>
+      </div>
+    </div>
+  `;
+
+  throw new Error(
+    "ROOM_ID missing"
+  );
 }
-function escapeHtml(value){return String(value||'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]))}
-async function api(url,body={}){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json();if(!j.ok)alert(j.error||'حدث خطأ');return j}
-async function saveConfig(){await api('/api/config',{broadcastId:document.getElementById('broadcastId').value,keyword:document.getElementById('keyword').value})}
-async function saveKeyword(){const keyword=document.getElementById('keyword').value.trim();if(!keyword){alert('اكتب كلمة التسجيل أولًا.');return;}await api('/api/config',{keyword})}
-function connectYouTube(){window.location.href='/api/auth'}
-async function start(){const keyword=document.getElementById('keyword').value.trim();if(!keyword){alert('اكتب كلمة التسجيل أولًا.');return;}const r=await api('/api/start',{broadcastId:document.getElementById('broadcastId').value,keyword});if(r.ok)alert('بدأت المسابقة الجديدة ✅')}
-async function stop(){await api('/api/stop')}
-async function del(i){await api('/api/delete/'+i)}
-async function resetAll(){if(confirm('مسح الجدول والسجل بالكامل؟'))await api('/api/reset')}
-async function copyObsUrl(){const v=document.getElementById('obsUrl').value;try{await navigator.clipboard.writeText(v);alert('تم نسخ الرابط ✅')}catch(e){prompt('انسخ الرابط:',v)}}
-fetch('/api/state').then(r=>r.json()).then(render);
-const wsProtocol=location.protocol==='https:'?'wss:':'ws:';
-ws=new WebSocket(`${wsProtocol}//${location.host}`);
-ws.onmessage=e=>{const d=JSON.parse(e.data);if(d.type==='state')render(d.state)};
+
+
+/* =========================================================
+   عناصر الصفحة
+========================================================= */
+
+const roomIdInput =
+  document.getElementById("roomId");
+
+const keywordInput =
+  document.getElementById("keyword");
+
+const obsUrlInput =
+  document.getElementById("obsUrl");
+
+const statusElement =
+  document.getElementById("status");
+
+const statusDot =
+  document.getElementById("statusDot");
+
+const countElement =
+  document.getElementById("count");
+
+const queueElement =
+  document.getElementById("queue");
+
+const rowsElement =
+  document.getElementById("rows");
+
+const connectButton =
+  document.getElementById("connectButton");
+
+const restreamNotice =
+  document.getElementById("restreamNotice");
+
+const startButton =
+  document.getElementById("startButton");
+
+const stopButton =
+  document.getElementById("stopButton");
+
+
+/* =========================================================
+   عرض معرف الغرفة
+========================================================= */
+
+roomIdInput.value =
+  ROOM_ID;
+
+
+/* =========================================================
+   حماية HTML
+========================================================= */
+
+function escapeHtml(value) {
+
+  return String(
+    value || ""
+  ).replace(
+    /[&<>"']/g,
+    function (m) {
+
+      return {
+        "&":"&amp;",
+        "<":"&lt;",
+        ">":"&gt;",
+        '"':"&quot;",
+        "'":"&#039;"
+      }[m];
+
+    }
+  );
+
+}
+
+
+/* =========================================================
+   عرض الحالة
+========================================================= */
+
+function render(state) {
+
+  if (!state) {
+    return;
+  }
+
+  currentState =
+    state;
+
+  statusElement.textContent =
+    state.status ||
+    "جاهز";
+
+  keywordInput.value =
+    state.keyword ||
+    "";
+
+  countElement.textContent =
+    state.count ||
+    0;
+
+  queueElement.textContent =
+    state.queued ||
+    0;
+
+  obsUrlInput.value =
+    state.obsUrl ||
+    `${location.origin}/obs/${ROOM_ID}`;
+
+
+  /* -------------------------------------------------------
+     تحديد حالة الاتصال بشكل بصري
+  ------------------------------------------------------- */
+
+  const status =
+    String(
+      state.status || ""
+    );
+
+  if (
+    status.includes("متصل")
+  ) {
+
+    statusDot.style.background =
+      "#20c879";
+
+  } else if (
+    status.includes("إعادة") ||
+    status.includes("يستعد") ||
+    status.includes("اتصال")
+  ) {
+
+    statusDot.style.background =
+      "#f0ad4e";
+
+  } else if (
+    status.includes("خطأ") ||
+    status.includes("تعذر")
+  ) {
+
+    statusDot.style.background =
+      "#e05260";
+
+  } else {
+
+    statusDot.style.background =
+      "#777";
+
+  }
+
+
+  /* -------------------------------------------------------
+     حالة Restream
+  ------------------------------------------------------- */
+
+  const connected =
+    status.includes("متصل") ||
+    status.includes("تم ربط Restream");
+
+  if (connected) {
+
+    restreamNotice.classList.remove(
+      "hidden"
+    );
+
+    connectButton.textContent =
+      "🔄 إعادة ربط Restream";
+
+  } else {
+
+    restreamNotice.classList.add(
+      "hidden"
+    );
+
+    connectButton.textContent =
+      "🔗 ربط حساب Restream";
+
+  }
+
+
+  /* -------------------------------------------------------
+     الأزرار
+  ------------------------------------------------------- */
+
+  if (state.active) {
+
+    startButton.disabled =
+      true;
+
+    stopButton.disabled =
+      false;
+
+  } else {
+
+    startButton.disabled =
+      false;
+
+    stopButton.disabled =
+      true;
+
+  }
+
+
+  renderParticipants(
+    state.participants || []
+  );
+
+}
+
+
+/* =========================================================
+   المشاركون
+========================================================= */
+
+function renderParticipants(
+  participants
+) {
+
+  rowsElement.innerHTML =
+    "";
+
+  for (
+    let i = 0;
+    i < 40;
+    i++
+  ) {
+
+    const tr =
+      document.createElement(
+        "tr"
+      );
+
+    const participant =
+      participants[i];
+
+    if (participant) {
+
+      tr.innerHTML = `
+
+        <td class="number">
+          ${i + 1}
+        </td>
+
+        <td class="name">
+          ${escapeHtml(
+            participant.youtubeName ||
+            "—"
+          )}
+        </td>
+
+        <td class="comment">
+          ${escapeHtml(
+            participant.comment ||
+            "—"
+          )}
+        </td>
+
+        <td>
+          <button
+            onclick="deleteParticipant(${i})"
+          >
+            حذف
+          </button>
+        </td>
+
+      `;
+
+    } else {
+
+      tr.innerHTML = `
+
+        <td class="number">
+          ${i + 1}
+        </td>
+
+        <td class="empty">
+          —
+        </td>
+
+        <td class="empty">
+          —
+        </td>
+
+        <td>
+          —
+        </td>
+
+      `;
+
+    }
+
+    rowsElement.appendChild(
+      tr
+    );
+
+  }
+
+}
+
+
+/* =========================================================
+   API
+========================================================= */
+
+async function api(
+  url,
+  body = {}
+) {
+
+  try {
+
+    const response =
+      await fetch(
+        url,
+        {
+          method:"POST",
+
+          headers:{
+            "Content-Type":
+              "application/json"
+          },
+
+          body:
+            JSON.stringify(
+              body
+            )
+        }
+      );
+
+    const data =
+      await response.json();
+
+    if (!response.ok || !data.ok) {
+
+      alert(
+        data.error ||
+        "حدث خطأ."
+      );
+
+      return {
+        ok:false
+      };
+
+    }
+
+    if (data.state) {
+
+      render(
+        data.state
+      );
+
+    }
+
+    return data;
+
+  } catch (error) {
+
+    console.error(
+      error
+    );
+
+    alert(
+      "تعذر الاتصال بالسيرفر."
+    );
+
+    return {
+      ok:false
+    };
+
+  }
+
+}
+
+
+/* =========================================================
+   تحميل الغرفة
+========================================================= */
+
+async function loadRoom() {
+
+  try {
+
+    const response =
+      await fetch(
+        `/api/rooms/${encodeURIComponent(
+          ROOM_ID
+        )}`
+      );
+
+    const data =
+      await response.json();
+
+    if (!response.ok || !data.ok) {
+
+      alert(
+        data.error ||
+        "الغرفة غير موجودة."
+      );
+
+      return;
+
+    }
+
+    render(
+      data.room
+    );
+
+  } catch (error) {
+
+    console.error(
+      error
+    );
+
+    statusElement.textContent =
+      "تعذر تحميل الغرفة";
+
+  }
+
+}
+
+
+/* =========================================================
+   ربط Restream
+========================================================= */
+
+function connectRestream() {
+
+  window.location.href =
+    `/api/auth/${encodeURIComponent(
+      ROOM_ID
+    )}`;
+
+}
+
+
+/* =========================================================
+   حفظ كلمة التسجيل
+========================================================= */
+
+async function saveKeyword() {
+
+  const keyword =
+    keywordInput.value.trim();
+
+  if (!keyword) {
+
+    alert(
+      "اكتب كلمة التسجيل أولًا."
+    );
+
+    return;
+
+  }
+
+  await api(
+    `/api/rooms/${encodeURIComponent(
+      ROOM_ID
+    )}/config`,
+    {
+      keyword
+    }
+  );
+
+}
+
+
+/* =========================================================
+   بداية
+========================================================= */
+
+async function startCompetition() {
+
+  const keyword =
+    keywordInput.value.trim();
+
+  if (!keyword) {
+
+    alert(
+      "اكتب كلمة التسجيل أولًا."
+    );
+
+    return;
+
+  }
+
+  if (
+    currentState &&
+    currentState.active
+  ) {
+
+    alert(
+      "المسابقة تعمل بالفعل."
+    );
+
+    return;
+
+  }
+
+  startButton.disabled =
+    true;
+
+  const result =
+    await api(
+      `/api/rooms/${encodeURIComponent(
+        ROOM_ID
+      )}/start`,
+      {
+        keyword
+      }
+    );
+
+  if (result.ok) {
+
+    alert(
+      "بدأت المسابقة الجديدة ✅"
+    );
+
+  } else {
+
+    startButton.disabled =
+      false;
+
+  }
+
+}
+
+
+/* =========================================================
+   توقف
+========================================================= */
+
+async function stopCompetition() {
+
+  if (
+    !confirm(
+      "هل تريد إيقاف المسابقة؟"
+    )
+  ) {
+
+    return;
+
+  }
+
+  await api(
+    `/api/rooms/${encodeURIComponent(
+      ROOM_ID
+    )}/stop`
+  );
+
+}
+
+
+/* =========================================================
+   حذف مشارك
+========================================================= */
+
+async function deleteParticipant(
+  index
+) {
+
+  await api(
+    `/api/rooms/${encodeURIComponent(
+      ROOM_ID
+    )}/delete/${index}`
+  );
+
+}
+
+
+/* =========================================================
+   مسح المسابقة
+========================================================= */
+
+async function resetCompetition() {
+
+  if (
+    !confirm(
+      "سيتم إيقاف المسابقة ومسح جميع المشاركين والسجل. هل أنت متأكد؟"
+    )
+  ) {
+
+    return;
+
+  }
+
+  await api(
+    `/api/rooms/${encodeURIComponent(
+      ROOM_ID
+    )}/reset`
+  );
+
+}
+
+
+/* =========================================================
+   إنهاء الغرفة
+========================================================= */
+
+async function logoutRoom() {
+
+  if (
+    !confirm(
+      "⚠️ سيتم إنهاء هذه الغرفة نهائيًا وحذف بياناتها المؤقتة. هل أنت متأكد؟"
+    )
+  ) {
+
+    return;
+
+  }
+
+  const result =
+    await api(
+      `/api/rooms/${encodeURIComponent(
+        ROOM_ID
+      )}/logout`
+    );
+
+  if (result.ok) {
+
+    window.location.href =
+      "/";
+
+  }
+
+}
+
+
+/* =========================================================
+   نسخ
+========================================================= */
+
+async function copyValue(
+  elementId
+) {
+
+  const element =
+    document.getElementById(
+      elementId
+    );
+
+  const value =
+    element.value;
+
+  if (!value) {
+    return;
+  }
+
+  try {
+
+    await navigator.clipboard.writeText(
+      value
+    );
+
+    alert(
+      "تم نسخ الرابط ✅"
+    );
+
+  } catch (error) {
+
+    prompt(
+      "انسخ القيمة:",
+      value
+    );
+
+  }
+
+}
+
+
+/* =========================================================
+   WebSocket
+========================================================= */
+
+function connectWebSocket() {
+
+  const protocol =
+    location.protocol === "https:"
+      ? "wss:"
+      : "ws:";
+
+  const url =
+    `${protocol}//${location.host}/ws?room=${encodeURIComponent(
+      ROOM_ID
+    )}`;
+
+  ws =
+    new WebSocket(
+      url
+    );
+
+
+  ws.onopen =
+    () => {
+
+      console.log(
+        "🔌 Browser WebSocket connected"
+      );
+
+    };
+
+
+  ws.onmessage =
+    (event) => {
+
+      try {
+
+        const data =
+          JSON.parse(
+            event.data
+          );
+
+        if (
+          data.type === "state"
+        ) {
+
+          render(
+            data.state
+          );
+
+        }
+
+      } catch (error) {
+
+        console.error(
+          "WebSocket message error:",
+          error
+        );
+
+      }
+
+    };
+
+
+  ws.onerror =
+    (error) => {
+
+      console.error(
+        "Browser WebSocket error:",
+        error
+      );
+
+    };
+
+
+  ws.onclose =
+    () => {
+
+      console.log(
+        "🔌 Browser WebSocket disconnected"
+      );
+
+      setTimeout(
+        () => {
+
+          connectWebSocket();
+
+        },
+        3000
+      );
+
+    };
+
+}
+
+
+/* =========================================================
+   تشغيل
+========================================================= */
+
+loadRoom();
+
+connectWebSocket();
+
 </script>
+
 </body>
 </html>
