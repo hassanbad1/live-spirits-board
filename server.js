@@ -5,7 +5,7 @@ const fs = require("fs");
 const crypto = require("crypto");
 const WebSocket = require("ws");
 
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 const app = express();
 const server = http.createServer(app);
@@ -17,9 +17,10 @@ app.use(express.static(path.join(__dirname, "public")));
    الإعدادات
 ========================================================= */
 
-const PUBLIC_URL =
+const PUBLIC_URL = (
   process.env.RENDER_EXTERNAL_URL ||
-  "https://live-spirits-board.onrender.com";
+  "https://live-spirits-board.onrender.com"
+).replace(/\/+$/, "");
 
 const REDIRECT_URI =
   process.env.RESTREAM_REDIRECT_URI ||
@@ -31,12 +32,54 @@ const RESTREAM_CLIENT_ID =
 const RESTREAM_CLIENT_SECRET =
   process.env.RESTREAM_CLIENT_SECRET || "";
 
-const ROOM_TTL_MS =
-  30 * 60 * 1000; // 30 دقيقة بعد آخر نشاط
-
 const MAX_PARTICIPANTS = 40;
 
 const DEFAULT_KEYWORD = "ارواح!";
+
+/*
+  الغرفة التي لا يوجد عليها أي نشاط للوحة التحكم
+  أو اتصال OBS لفترة طويلة يتم حذفها.
+
+  هذه ليست مدة المسابقة.
+  هي فقط مدة بقاء الغرفة في الذاكرة.
+*/
+const ROOM_TTL_MS = 30 * 60 * 1000;
+
+/*
+  OAuth state صالح لمدة 10 دقائق.
+*/
+const OAUTH_SESSION_TTL_MS = 10 * 60 * 1000;
+
+/*
+  إعادة اتصال Restream.
+*/
+const RESTREAM_RECONNECT_DELAY_MS = 3000;
+
+/*
+  Restream heartbeat يكون تقريبًا كل 45 ثانية.
+  نعتبر الاتصال غير سليم إذا لم نر heartbeat
+  لفترة أطول من ذلك.
+*/
+const HEARTBEAT_TIMEOUT_MS = 75 * 1000;
+
+const HEARTBEAT_CHECK_INTERVAL_MS = 15 * 1000;
+
+/*
+  أنواع أحداث الشات النصية المعروفة في Restream.
+  نحن لا نعتمد على كل event، بل على أنواع النص فقط.
+*/
+const TEXT_EVENT_TYPE_IDS = new Set([
+  1,  // Discord Text
+  2,  // DLive Text
+  4,  // Twitch Text
+  5,  // YouTube Text
+  11, // Facebook Text
+  21, // LinkedIn Text
+  22, // Trovo Text
+  24, // X Text
+  25, // Kick Text
+  32  // Rumble Text
+]);
 
 /* =========================================================
    فحص إعدادات Restream
@@ -58,33 +101,26 @@ if (!RESTREAM_CLIENT_SECRET) {
    الغرف
 ========================================================= */
 
-/*
-  كل غرفة لها:
-  - معرف خاص
-  - كلمة تسجيل خاصة
-  - مشاركون خاصون
-  - Restream OAuth خاص
-  - WebSocket خاص
-  - رابط OBS خاص
-
-  لا يوجد state عالمي للمستخدمين.
-*/
-
 const rooms = new Map();
+
+/*
+  كل OAuth state مرتبط بغرفة واحدة.
+*/
+const oauthSessions = new Map();
 
 /* =========================================================
    أدوات عامة
 ========================================================= */
 
 function cleanText(value, maxLength = 500) {
-  return String(value || "")
+  return String(value ?? "")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, maxLength);
 }
 
 function normalized(value) {
-  return String(value || "")
+  return String(value ?? "")
     .trim()
     .toLocaleLowerCase("ar");
 }
@@ -97,19 +133,13 @@ function now() {
   return Date.now();
 }
 
-/* =========================================================
-   ملفات الجلسات المؤقتة
-========================================================= */
-
-/*
-  لا نخزن بيانات المستخدم في GitHub.
-  كل شيء مؤقت داخل ذاكرة السيرفر.
-
-  إذا أعاد Render التشغيل:
-  تختفي الغرف والـ tokens من الذاكرة.
-*/
-
-const oauthSessions = new Map();
+function safeUrl(value) {
+  try {
+    return new URL(value);
+  } catch (_) {
+    return null;
+  }
+}
 
 /* =========================================================
    إنشاء غرفة
@@ -123,8 +153,19 @@ function createRoom() {
 
     createdAt: now(),
 
+    /*
+      آخر نشاط فعلي للغرفة.
+    */
     lastActivityAt: now(),
 
+    /*
+      آخر نشاط من واجهة المتصفح.
+    */
+    lastBrowserActivityAt: now(),
+
+    /*
+      المسابقة نفسها.
+    */
     active: false,
 
     keyword: DEFAULT_KEYWORD,
@@ -133,15 +174,35 @@ function createRoom() {
 
     queue: [],
 
+    /*
+      مفاتيح الأشخاص الذين تم تسجيلهم.
+    */
     history: new Set(),
 
+    /*
+      وقت بداية المسابقة.
+    */
     competitionStartedAt: 0,
 
+    /*
+      وقت فتح WebSocket الجديد.
+    */
+    chatConnectionStartedAt: 0,
+
     status: "جاهز",
+
+    /*
+      WebSocket clients الخاصة بالواجهة وOBS.
+    */
+    browserClients: new Set(),
 
     restream: {
       accessToken: "",
       refreshToken: "",
+
+      /*
+        Unix ms.
+      */
       expiresAt: 0,
 
       connected: false,
@@ -152,7 +213,9 @@ function createRoom() {
 
       reconnecting: false,
 
-      heartbeatTimer: null
+      heartbeatTimer: null,
+
+      lastHeartbeatAt: 0
     }
   };
 
@@ -193,11 +256,16 @@ function publicRoomState(room) {
 
     keyword: room.keyword,
 
-    participants:
-      room.participants.map((p) => ({
-        youtubeName: p.youtubeName,
-        comment: p.comment
-      })),
+    /*
+      نخفي البيانات الداخلية مثل:
+      platform
+      key
+      tokens
+    */
+    participants: room.participants.map((p) => ({
+      youtubeName: p.youtubeName,
+      comment: p.comment
+    })),
 
     queued: room.queue.length,
 
@@ -205,13 +273,21 @@ function publicRoomState(room) {
 
     status: room.status,
 
+    connected: Boolean(
+      room.restream.connected
+    ),
+
+    restreamConnected: Boolean(
+      room.restream.connected
+    ),
+
     obsUrl:
-      `${PUBLIC_URL}/obs/${room.id}`
+      `${PUBLIC_URL}/obs/${encodeURIComponent(room.id)}`
   };
 }
 
 /* =========================================================
-   WebSocket للواجهة
+   إرسال حالة الغرفة للواجهات
 ========================================================= */
 
 function sendRoomState(room) {
@@ -225,15 +301,17 @@ function sendRoomState(room) {
   });
 
   for (const client of room.browserClients) {
-    if (client.readyState === WebSocket.OPEN) {
-      try {
-        client.send(message);
-      } catch (err) {
-        console.error(
-          "❌ Browser WebSocket send error:",
-          err.message
-        );
-      }
+    if (client.readyState !== WebSocket.OPEN) {
+      continue;
+    }
+
+    try {
+      client.send(message);
+    } catch (err) {
+      console.error(
+        "❌ Browser WebSocket send error:",
+        err.message
+      );
     }
   }
 }
@@ -243,13 +321,11 @@ function sendRoomState(room) {
 ========================================================= */
 
 function json(res, status, data) {
-  res
-    .status(status)
-    .json(data);
+  res.status(status).json(data);
 }
 
 /* =========================================================
-   التحقق من الغرفة
+   الحصول على الغرفة من الطلب
 ========================================================= */
 
 function getRoomFromRequest(req, res) {
@@ -289,18 +365,16 @@ function getRoomFromRequest(req, res) {
 ========================================================= */
 
 app.get("/", (req, res) => {
-  const publicIndex =
-    path.join(
-      __dirname,
-      "public",
-      "index.html"
-    );
+  const publicIndex = path.join(
+    __dirname,
+    "public",
+    "index.html"
+  );
 
-  const rootIndex =
-    path.join(
-      __dirname,
-      "index.html"
-    );
+  const rootIndex = path.join(
+    __dirname,
+    "index.html"
+  );
 
   if (fs.existsSync(publicIndex)) {
     return res.sendFile(publicIndex);
@@ -310,11 +384,9 @@ app.get("/", (req, res) => {
     return res.sendFile(rootIndex);
   }
 
-  res
+  return res
     .status(404)
-    .send(
-      "لم يتم العثور على index.html"
-    );
+    .send("لم يتم العثور على index.html");
 });
 
 /* =========================================================
@@ -324,29 +396,23 @@ app.get("/", (req, res) => {
 app.get(
   "/control.html",
   (req, res, next) => {
-    const publicControl =
-      path.join(
-        __dirname,
-        "public",
-        "control.html"
-      );
+    const publicControl = path.join(
+      __dirname,
+      "public",
+      "control.html"
+    );
 
-    const rootControl =
-      path.join(
-        __dirname,
-        "control.html"
-      );
+    const rootControl = path.join(
+      __dirname,
+      "control.html"
+    );
 
     if (fs.existsSync(publicControl)) {
-      return res.sendFile(
-        publicControl
-      );
+      return res.sendFile(publicControl);
     }
 
     if (fs.existsSync(rootControl)) {
-      return res.sendFile(
-        rootControl
-      );
+      return res.sendFile(rootControl);
     }
 
     next();
@@ -360,29 +426,28 @@ app.get(
 app.get(
   "/obs/:roomId",
   (req, res) => {
-    const room =
-      rooms.get(req.params.roomId);
+    const room = rooms.get(
+      req.params.roomId
+    );
 
     if (!room) {
       return res
         .status(404)
-        .send(
-          "هذه الغرفة انتهت."
-        );
+        .send("هذه الغرفة انتهت.");
     }
 
-    const publicObs =
-      path.join(
-        __dirname,
-        "public",
-        "obs.html"
-      );
+    touchRoom(room);
 
-    const rootObs =
-      path.join(
-        __dirname,
-        "obs.html"
-      );
+    const publicObs = path.join(
+      __dirname,
+      "public",
+      "obs.html"
+    );
+
+    const rootObs = path.join(
+      __dirname,
+      "obs.html"
+    );
 
     if (fs.existsSync(publicObs)) {
       return res.sendFile(publicObs);
@@ -392,7 +457,7 @@ app.get(
       return res.sendFile(rootObs);
     }
 
-    res
+    return res
       .status(404)
       .send(
         "لم يتم العثور على obs.html"
@@ -407,8 +472,7 @@ app.get(
 app.post(
   "/api/rooms",
   (req, res) => {
-    const room =
-      createRoom();
+    const room = createRoom();
 
     json(res, 200, {
       ok: true,
@@ -417,10 +481,14 @@ app.post(
         roomId: room.id,
 
         controlUrl:
-          `${PUBLIC_URL}/control.html?room=${room.id}`,
+          `${PUBLIC_URL}/control.html?room=${encodeURIComponent(
+            room.id
+          )}`,
 
         obsUrl:
-          `${PUBLIC_URL}/obs/${room.id}`,
+          `${PUBLIC_URL}/obs/${encodeURIComponent(
+            room.id
+          )}`,
 
         state:
           publicRoomState(room)
@@ -448,28 +516,21 @@ app.get(
 
     json(res, 200, {
       ok: true,
-
       room: publicRoomState(room)
     });
   }
 );
 
 /* =========================================================
-   OAuth
+   Restream OAuth
 ========================================================= */
-
-/*
-  نستخدم state مختلف لكل محاولة تسجيل دخول.
-  هذا يمنع CSRF.
-*/
 
 app.get(
   "/api/auth/:roomId",
   (req, res) => {
-    const room =
-      rooms.get(
-        req.params.roomId
-      );
+    const room = rooms.get(
+      req.params.roomId
+    );
 
     if (!room) {
       return res
@@ -490,19 +551,22 @@ app.get(
         );
     }
 
-    touchRoom(room);
+    /*
+      لا نحتاج scope يدويًا هنا.
+      صلاحيات التطبيق يحددها إعداد Restream.
+    */
 
-    const state =
-      randomId(24);
+    const state = randomId(32);
 
     oauthSessions.set(
       state,
       {
         roomId: room.id,
-
         createdAt: now()
       }
     );
+
+    touchRoom(room);
 
     const params =
       new URLSearchParams({
@@ -524,7 +588,7 @@ app.get(
       `🔗 بدء Restream OAuth للغرفة ${room.id}`
     );
 
-    res.redirect(
+    return res.redirect(
       authorizeUrl
     );
   }
@@ -544,6 +608,9 @@ app.get(
         error
       } = req.query;
 
+      /*
+        Restream قد يرجع بدون code إذا رفض المستخدم.
+      */
       if (error) {
         return res
           .status(400)
@@ -562,11 +629,14 @@ app.get(
 
       const session =
         oauthSessions.get(
-          state
+          String(state)
         );
 
+      /*
+        State يستخدم مرة واحدة فقط.
+      */
       oauthSessions.delete(
-        state
+        String(state)
       );
 
       if (!session) {
@@ -580,7 +650,7 @@ app.get(
       if (
         now() -
           session.createdAt >
-        10 * 60 * 1000
+        OAUTH_SESSION_TTL_MS
       ) {
         return res
           .status(400)
@@ -607,9 +677,7 @@ app.get(
       const basicAuth =
         Buffer.from(
           `${RESTREAM_CLIENT_ID}:${RESTREAM_CLIENT_SECRET}`
-        ).toString(
-          "base64"
-        );
+        ).toString("base64");
 
       const body =
         new URLSearchParams({
@@ -619,7 +687,7 @@ app.get(
           redirect_uri:
             REDIRECT_URI,
 
-          code
+          code: String(code)
         });
 
       const response =
@@ -636,7 +704,7 @@ app.get(
                 `Basic ${basicAuth}`
             },
 
-            body
+            body: body.toString()
           }
         );
 
@@ -655,16 +723,31 @@ app.get(
         );
       }
 
-      room.restream.accessToken =
+      const accessToken =
         data.access_token ||
         data.accessToken ||
         "";
 
-      room.restream.refreshToken =
+      const refreshToken =
         data.refresh_token ||
         data.refreshToken ||
         "";
 
+      if (!accessToken) {
+        throw new Error(
+          "Restream لم يرجع Access Token."
+        );
+      }
+
+      room.restream.accessToken =
+        accessToken;
+
+      room.restream.refreshToken =
+        refreshToken;
+
+      /*
+        Restream يعيد expires_in بالثواني.
+      */
       const expiresIn =
         Number(
           data.expires_in ||
@@ -683,6 +766,9 @@ app.get(
       room.status =
         "تم ربط Restream بنجاح";
 
+      room.restream.connected =
+        false;
+
       touchRoom(room);
 
       console.log(
@@ -691,12 +777,15 @@ app.get(
 
       sendRoomState(room);
 
-      res.send(`
+      return res.send(`
         <!doctype html>
         <html lang="ar" dir="rtl">
         <head>
           <meta charset="utf-8">
-          <meta name="viewport" content="width=device-width,initial-scale=1">
+          <meta
+            name="viewport"
+            content="width=device-width,initial-scale=1"
+          >
           <title>تم الربط</title>
         </head>
 
@@ -750,7 +839,7 @@ app.get(
         err
       );
 
-      res
+      return res
         .status(500)
         .send(
           "فشل ربط Restream: " +
@@ -767,9 +856,7 @@ app.get(
    Refresh Access Token
 ========================================================= */
 
-async function refreshAccessToken(
-  room
-) {
+async function refreshAccessToken(room) {
   if (
     !room?.restream?.refreshToken
   ) {
@@ -781,9 +868,7 @@ async function refreshAccessToken(
   const basicAuth =
     Buffer.from(
       `${RESTREAM_CLIENT_ID}:${RESTREAM_CLIENT_SECRET}`
-    ).toString(
-      "base64"
-    );
+    ).toString("base64");
 
   const body =
     new URLSearchParams({
@@ -808,7 +893,7 @@ async function refreshAccessToken(
             `Basic ${basicAuth}`
         },
 
-        body
+        body: body.toString()
       }
     );
 
@@ -817,7 +902,7 @@ async function refreshAccessToken(
 
   if (!response.ok) {
     console.error(
-      "❌ Restream refresh error:",
+      `❌ Restream refresh error (${room.id}):`,
       data
     );
 
@@ -827,18 +912,33 @@ async function refreshAccessToken(
     );
   }
 
-  room.restream.accessToken =
+  const newAccessToken =
     data.access_token ||
     data.accessToken ||
-    room.restream.accessToken;
+    "";
 
-  if (
+  const newRefreshToken =
     data.refresh_token ||
-    data.refreshToken
-  ) {
+    data.refreshToken ||
+    "";
+
+  if (!newAccessToken) {
+    throw new Error(
+      "Restream لم يرجع Access Token جديد."
+    );
+  }
+
+  /*
+    مهم:
+    Restream يصدر زوجًا جديدًا عند refresh.
+    لذلك يجب حفظ refresh token الجديد أيضًا.
+  */
+  room.restream.accessToken =
+    newAccessToken;
+
+  if (newRefreshToken) {
     room.restream.refreshToken =
-      data.refresh_token ||
-      data.refreshToken;
+      newRefreshToken;
   }
 
   const expiresIn =
@@ -867,10 +967,10 @@ async function refreshAccessToken(
    الحصول على Access Token صالح
 ========================================================= */
 
-async function getValidAccessToken(
-  room
-) {
-  if (!room.restream.accessToken) {
+async function getValidAccessToken(room) {
+  if (
+    !room?.restream?.accessToken
+  ) {
     throw new Error(
       "لم يتم ربط حساب Restream بهذه الغرفة."
     );
@@ -920,6 +1020,20 @@ function registrationComment(
     return null;
   }
 
+  /*
+    إذا كانت الكلمة:
+    ارواح!
+
+    فـ:
+    ارواح! حسن
+    مقبول
+
+    أما:
+    ارواح!حسن
+    غير مقبول
+
+    حتى لا نسجل كلمات تبدأ صدفة بالكلمة.
+  */
   const next =
     comment.charAt(
       key.length
@@ -943,7 +1057,8 @@ function addParticipant(
   room,
   displayName,
   userId,
-  comment
+  comment,
+  platform
 ) {
   const name =
     cleanText(
@@ -957,14 +1072,33 @@ function addParticipant(
       500
     );
 
+  const source =
+    cleanText(
+      platform,
+      50
+    ) || "unknown";
+
   if (!name || !text) {
     return false;
   }
 
+  /*
+    مهم جدًا:
+    لا نستخدم ID وحده.
+
+    مثال:
+    YouTube user ID = 123
+    Twitch user ID = 123
+
+    هما شخصان مختلفان.
+
+    لذلك المفتاح:
+    platform + userId
+  */
   const key =
     userId
-      ? `id:${userId}`
-      : `name:${normalized(name)}`;
+      ? `id:${source}:${String(userId)}`
+      : `name:${source}:${normalized(name)}`;
 
   if (
     room.history.has(key)
@@ -979,7 +1113,14 @@ function addParticipant(
 
     comment: text,
 
-    key
+    key,
+
+    platform: source,
+
+    userId:
+      userId
+        ? String(userId)
+        : null
   };
 
   if (
@@ -1050,12 +1191,10 @@ function deleteParticipant(
 }
 
 /* =========================================================
-   إيقاف Restream Chat
+   تنظيف مؤقتات Restream
 ========================================================= */
 
-function stopRestreamChat(
-  room
-) {
+function clearRestreamTimers(room) {
   if (!room) {
     return;
   }
@@ -1081,60 +1220,254 @@ function stopRestreamChat(
     room.restream.heartbeatTimer =
       null;
   }
+}
+
+/* =========================================================
+   إيقاف Restream Chat
+========================================================= */
+
+function stopRestreamChat(room) {
+  if (!room) {
+    return;
+  }
+
+  clearRestreamTimers(room);
 
   room.restream.reconnecting =
     false;
 
-  if (
-    room.restream.socket
-  ) {
-    try {
-      room.restream.socket.close();
-    } catch (_) {}
-  }
+  const socket =
+    room.restream.socket;
 
   room.restream.socket =
     null;
 
   room.restream.connected =
     false;
+
+  room.restream.lastHeartbeatAt =
+    0;
+
+  if (socket) {
+    try {
+      socket.close();
+    } catch (_) {}
+  }
+}
+
+/* =========================================================
+   استخراج نص الحدث
+========================================================= */
+
+function extractChatMessage(action) {
+  if (
+    !action ||
+    action.action !== "event"
+  ) {
+    return null;
+  }
+
+  const eventTypeId =
+    Number(
+      action.eventTypeId ??
+      action.payload?.eventTypeId ??
+      action.data?.eventTypeId
+    );
+
+  /*
+    Restream الحالي يرسل eventTypeId
+    مع eventPayload.
+  */
+  const payload =
+    action.eventPayload ||
+    action.payload?.eventPayload ||
+    action.data?.eventPayload ||
+    {};
+
+  /*
+    لا نعالج إلا Text events.
+  */
+  if (
+    !TEXT_EVENT_TYPE_IDS.has(
+      eventTypeId
+    )
+  ) {
+    return null;
+  }
+
+  const text =
+    cleanText(
+      payload.text,
+      500
+    );
+
+  if (!text) {
+    return null;
+  }
+
+  const author =
+    payload.author || {};
+
+  const displayName =
+    author.displayName ||
+    author.name ||
+    author.username ||
+    author.nickname ||
+    "مستخدم";
+
+  const userId =
+    author.id !== undefined &&
+    author.id !== null
+      ? String(author.id)
+      : null;
+
+  /*
+    Restream eventSourceId:
+    يحدد مصدر الرسالة.
+  */
+  const eventSourceId =
+    Number(
+      action.eventSourceId ??
+      action.payload?.eventSourceId ??
+      action.data?.eventSourceId
+    );
+
+  return {
+    eventTypeId,
+
+    eventSourceId,
+
+    text,
+
+    displayName:
+      cleanText(
+        displayName,
+        100
+      ),
+
+    userId
+  };
+}
+
+/* =========================================================
+   التحقق من أن الحدث ليس أقدم من بداية المسابقة
+========================================================= */
+
+function eventIsAfterCompetitionStart(
+  room,
+  action
+) {
+  if (
+    !room.competitionStartedAt
+  ) {
+    return false;
+  }
+
+  /*
+    بعض رسائل Restream قد تحتوي timestamp
+    وبعضها قد لا تحتويه.
+
+    إذا وجدنا timestamp واضحًا:
+    نقارنه.
+
+    إذا لم يوجد:
+    نعتمد على أن WebSocket نفسه تم فتحه
+    بعد الضغط على بداية.
+  */
+  const possibleTimestamp =
+    action.timestamp ??
+    action.payload?.timestamp ??
+    action.eventPayload?.timestamp;
+
+  if (
+    possibleTimestamp !== undefined &&
+    possibleTimestamp !== null
+  ) {
+    let eventTime =
+      Number(
+        possibleTimestamp
+      );
+
+    /*
+      إذا كان بالثواني نحوله إلى ms.
+    */
+    if (
+      Number.isFinite(eventTime) &&
+      eventTime > 0 &&
+      eventTime < 100000000000
+    ) {
+      eventTime *= 1000;
+    }
+
+    if (
+      Number.isFinite(eventTime) &&
+      eventTime > 0
+    ) {
+      return (
+        eventTime >=
+        room.competitionStartedAt
+      );
+    }
+
+    const parsed =
+      Date.parse(
+        String(possibleTimestamp)
+      );
+
+    if (
+      Number.isFinite(parsed)
+    ) {
+      return (
+        parsed >=
+        room.competitionStartedAt
+      );
+    }
+  }
+
+  /*
+    لا يوجد timestamp:
+    لأن اتصال الشات الحالي بدأ بعد الضغط
+    على "بداية"، نسمح بالحدث.
+  */
+  return true;
 }
 
 /* =========================================================
    بدء Restream Chat WebSocket
 ========================================================= */
 
-async function startRestreamChat(
-  room
-) {
+async function startRestreamChat(room) {
   if (!room) {
     return;
   }
 
-  if (
-    !room.active
-  ) {
+  if (!room.active) {
     return;
   }
 
+  /*
+    إذا يوجد socket شغال، لا ننشئ واحدًا ثانيًا.
+  */
   if (
     room.restream.socket &&
-    room.restream.socket.readyState ===
-      WebSocket.OPEN
+    (
+      room.restream.socket.readyState ===
+        WebSocket.OPEN ||
+      room.restream.socket.readyState ===
+        WebSocket.CONNECTING
+    )
   ) {
     return;
   }
 
+  /*
+    منع سباق الاتصالات.
+  */
   if (
     room.restream.reconnecting
   ) {
     return;
   }
-
-  const token =
-    await getValidAccessToken(
-      room
-    );
 
   room.restream.reconnecting =
     true;
@@ -1143,6 +1476,27 @@ async function startRestreamChat(
     "الاتصال بشات Restream...";
 
   sendRoomState(room);
+
+  let token;
+
+  try {
+    token =
+      await getValidAccessToken(
+        room
+      );
+  } catch (err) {
+    room.restream.reconnecting =
+      false;
+
+    throw err;
+  }
+
+  if (!room.active) {
+    room.restream.reconnecting =
+      false;
+
+    return;
+  }
 
   const url =
     `wss://chat.api.restream.io/ws?accessToken=${encodeURIComponent(
@@ -1153,20 +1507,53 @@ async function startRestreamChat(
     `🔌 Connecting Restream Chat for room ${room.id}`
   );
 
-  const socket =
-    new WebSocket(url);
+  let socket;
+
+  try {
+    socket =
+      new WebSocket(url);
+  } catch (err) {
+    room.restream.reconnecting =
+      false;
+
+    throw err;
+  }
 
   room.restream.socket =
     socket;
 
+  /*
+    نثبت وقت فتح هذا الاتصال.
+    هذا هو اتصال المسابقة الحالي.
+  */
+  room.chatConnectionStartedAt =
+    now();
+
   socket.on(
     "open",
     () => {
+      /*
+        قد يكون socket قديمًا وتم استبداله.
+      */
+      if (
+        room.restream.socket !==
+        socket
+      ) {
+        try {
+          socket.close();
+        } catch (_) {}
+
+        return;
+      }
+
       room.restream.reconnecting =
         false;
 
       room.restream.connected =
         true;
+
+      room.restream.lastHeartbeatAt =
+        now();
 
       room.status =
         "متصل بشات Restream ويستقبل الرسائل";
@@ -1179,47 +1566,39 @@ async function startRestreamChat(
 
       sendRoomState(room);
 
-      if (
+      clearInterval(
         room.restream.heartbeatTimer
-      ) {
-        clearInterval(
-          room.restream.heartbeatTimer
-        );
-      }
-
-      /*
-        Restream يرسل heartbeat تقريبًا كل 45 ثانية.
-        إذا لم يصل heartbeat خلال 60 ثانية
-        نعيد إنشاء الاتصال.
-      */
-
-      room.restream.lastHeartbeatAt =
-        now();
+      );
 
       room.restream.heartbeatTimer =
         setInterval(
           () => {
             if (
-              !room.active
+              !room.active ||
+              room.restream.socket !==
+                socket
             ) {
               return;
             }
 
-            if (
+            const elapsed =
               now() -
-                room.restream.lastHeartbeatAt >
-              70 * 1000
+              room.restream.lastHeartbeatAt;
+
+            if (
+              elapsed >
+              HEARTBEAT_TIMEOUT_MS
             ) {
               console.warn(
                 `⚠️ Restream heartbeat timeout: ${room.id}`
               );
 
               try {
-                socket.close();
+                socket.terminate();
               } catch (_) {}
             }
           },
-          15000
+          HEARTBEAT_CHECK_INTERVAL_MS
         );
     }
   );
@@ -1227,14 +1606,15 @@ async function startRestreamChat(
   socket.on(
     "message",
     (raw) => {
+      /*
+        تجاهل رسائل socket قديم.
+      */
       if (
         room.restream.socket !==
         socket
       ) {
         return;
       }
-
-      touchRoom(room);
 
       let action;
 
@@ -1245,7 +1625,7 @@ async function startRestreamChat(
           );
       } catch (err) {
         console.error(
-          "❌ Invalid Restream message:",
+          `❌ Invalid Restream message (${room.id}):`,
           err.message
         );
 
@@ -1253,9 +1633,8 @@ async function startRestreamChat(
       }
 
       /*
-        heartbeat
+        Heartbeat.
       */
-
       if (
         action.action ===
         "heartbeat"
@@ -1267,9 +1646,8 @@ async function startRestreamChat(
       }
 
       /*
-        connection_info
+        معلومات الاتصال.
       */
-
       if (
         action.action ===
         "connection_info"
@@ -1278,7 +1656,9 @@ async function startRestreamChat(
           action.payload || {};
 
         console.log(
-          `ℹ️ Restream connection ${payload.status} - room ${room.id}`
+          `ℹ️ Restream connection ${
+            payload.status || "unknown"
+          } - room ${room.id}`
         );
 
         if (
@@ -1286,8 +1666,10 @@ async function startRestreamChat(
           "error"
         ) {
           console.error(
-            "❌ Restream source error:",
-            payload.reason
+            `❌ Restream source error (${room.id}):`,
+            payload.reason ||
+              payload.message ||
+              "unknown"
           );
         }
 
@@ -1295,9 +1677,8 @@ async function startRestreamChat(
       }
 
       /*
-        connection_closed
+        اتصال مصدر انتهى.
       */
-
       if (
         action.action ===
         "connection_closed"
@@ -1310,9 +1691,8 @@ async function startRestreamChat(
       }
 
       /*
-        event
+        لا نحتاج أي action آخر.
       */
-
       if (
         action.action !==
         "event"
@@ -1320,67 +1700,52 @@ async function startRestreamChat(
         return;
       }
 
-      const payload =
-        action.payload || {};
-
-      const eventPayload =
-        payload.eventPayload || {};
-
       /*
-        نحتاج فقط رسائل النص.
-        نتجاهل Super Chat / Stickers / Memberships
-        وغيرها.
-
-        eventTypeId:
-        1  Discord
-        2  DLive
-        4  Twitch
-        5  YouTube
-        11 Facebook
-        21 LinkedIn
-        22 Trovo
-        24 X
-        25 Kick
-        32 Rumble
+        يجب أن تكون المسابقة ما زالت فعالة.
       */
-
-      const text =
-        cleanText(
-          eventPayload.text,
-          500
-        );
-
-      if (!text) {
+      if (!room.active) {
         return;
       }
 
       /*
-        اسم المستخدم من مختلف المنصات.
+        لا نريد أحداثًا أقدم من بداية المسابقة
+        إذا كان Restream قد أرسل timestamp.
       */
+      if (
+        !eventIsAfterCompetitionStart(
+          room,
+          action
+        )
+      ) {
+        return;
+      }
 
-      const author =
-        eventPayload.author || {};
+      const message =
+        extractChatMessage(
+          action
+        );
 
-      const displayName =
-        author.displayName ||
-        author.name ||
-        author.username ||
-        author.nickname ||
-        "مستخدم";
+      if (!message) {
+        return;
+      }
 
-      const userId =
-        author.id
-          ? String(author.id)
-          : null;
+      const {
+        text,
+        displayName,
+        userId,
+        eventSourceId
+      } = message;
 
+      /*
+        لا نعرض الـtokens أو أي معلومات حساسة.
+      */
       console.log(
-        `💬 Restream chat: ${text}`
+        `💬 Restream chat [room=${room.id}] [source=${eventSourceId}]: ${text}`
       );
 
       /*
-        البحث عن كلمة التسجيل فقط.
+        هل يبدأ التعليق بكلمة التسجيل؟
       */
-
       const comment =
         registrationComment(
           text,
@@ -1391,12 +1756,25 @@ async function startRestreamChat(
         return;
       }
 
+      /*
+        نستخدم eventSourceId كجزء من
+        معرف المنصة.
+
+        هذا يحل مشكلة:
+        نفس user ID في منصتين مختلفتين.
+      */
+      const platform =
+        eventSourceId
+          ? `source-${eventSourceId}`
+          : "unknown";
+
       const added =
         addParticipant(
           room,
           displayName,
           userId,
-          comment
+          comment,
+          platform
         );
 
       if (added) {
@@ -1419,9 +1797,9 @@ async function startRestreamChat(
 
   socket.on(
     "close",
-    () => {
+    (code, reason) => {
       console.log(
-        `🔌 Restream Chat disconnected: ${room.id}`
+        `🔌 Restream Chat disconnected: ${room.id} (${code})`
       );
 
       if (
@@ -1433,6 +1811,9 @@ async function startRestreamChat(
 
         room.restream.connected =
           false;
+
+        room.restream.lastHeartbeatAt =
+          0;
       }
 
       if (
@@ -1447,18 +1828,27 @@ async function startRestreamChat(
       }
 
       if (
-        room.active
+        !room.active
       ) {
-        scheduleRestreamReconnect(
-          room
-        );
+        room.restream.reconnecting =
+          false;
+
+        return;
       }
+
+      /*
+        إذا انقطع أثناء المسابقة،
+        نعيد الاتصال.
+      */
+      scheduleRestreamReconnect(
+        room
+      );
     }
   );
 }
 
 /* =========================================================
-   إعادة الاتصال بـRestream
+   إعادة الاتصال بـ Restream
 ========================================================= */
 
 function scheduleRestreamReconnect(
@@ -1466,8 +1856,25 @@ function scheduleRestreamReconnect(
 ) {
   if (
     !room ||
-    !room.active ||
-    room.restream.reconnecting
+    !room.active
+  ) {
+    return;
+  }
+
+  if (
+    room.restream.reconnectTimer
+  ) {
+    return;
+  }
+
+  if (
+    room.restream.socket &&
+    (
+      room.restream.socket.readyState ===
+        WebSocket.OPEN ||
+      room.restream.socket.readyState ===
+        WebSocket.CONNECTING
+    )
   ) {
     return;
   }
@@ -1479,14 +1886,6 @@ function scheduleRestreamReconnect(
     "إعادة الاتصال بـRestream...";
 
   sendRoomState(room);
-
-  if (
-    room.restream.reconnectTimer
-  ) {
-    clearTimeout(
-      room.restream.reconnectTimer
-    );
-  }
 
   room.restream.reconnectTimer =
     setTimeout(
@@ -1513,26 +1912,23 @@ function scheduleRestreamReconnect(
             err.message
           );
 
+          if (
+            !room.active
+          ) {
+            return;
+          }
+
           room.status =
             "تعذر الاتصال بـRestream، ستتم إعادة المحاولة...";
 
           sendRoomState(room);
 
-          setTimeout(
-            () => {
-              if (
-                room.active
-              ) {
-                scheduleRestreamReconnect(
-                  room
-                );
-              }
-            },
-            5000
+          scheduleRestreamReconnect(
+            room
           );
         }
       },
-      2000
+      RESTREAM_RECONNECT_DELAY_MS
     );
 }
 
@@ -1554,8 +1950,15 @@ app.post(
     }
 
     try {
+      /*
+        تغيير كلمة التسجيل عند البداية
+        اختياري.
+      */
       if (
-        req.body?.keyword
+        Object.prototype.hasOwnProperty.call(
+          req.body || {},
+          "keyword"
+        )
       ) {
         const keyword =
           cleanText(
@@ -1581,8 +1984,14 @@ app.post(
         );
       }
 
+      /*
+        نغلق أي اتصال سابق بالكامل.
+      */
       stopRestreamChat(room);
 
+      /*
+        نبدأ مسابقة نظيفة.
+      */
       room.participants = [];
 
       room.queue = [];
@@ -1590,8 +1999,15 @@ app.post(
       room.history =
         new Set();
 
+      /*
+        هذا هو الحد الفاصل:
+        أي تسجيل بعد هذه اللحظة فقط.
+      */
       room.competitionStartedAt =
         now();
+
+      room.chatConnectionStartedAt =
+        0;
 
       room.active = true;
 
@@ -1631,7 +2047,10 @@ app.post(
         ok: false,
 
         error:
-          err.message
+          cleanText(
+            err.message,
+            500
+          )
       });
     }
   }
@@ -1658,6 +2077,12 @@ app.post(
 
     room.status =
       "متوقف";
+
+    room.competitionStartedAt =
+      0;
+
+    room.chatConnectionStartedAt =
+      0;
 
     stopRestreamChat(room);
 
@@ -1693,7 +2118,7 @@ app.post(
 
     if (
       Object.prototype.hasOwnProperty.call(
-        req.body,
+        req.body || {},
         "keyword"
       )
     ) {
@@ -1799,6 +2224,9 @@ app.post(
     room.competitionStartedAt =
       0;
 
+    room.chatConnectionStartedAt =
+      0;
+
     touchRoom(room);
 
     sendRoomState(room);
@@ -1818,7 +2246,7 @@ app.post(
 
 app.post(
   "/api/rooms/:roomId/logout",
-  (req, res) => {
+  async (req, res) => {
     const room =
       rooms.get(
         req.params.roomId
@@ -1830,7 +2258,10 @@ app.post(
       });
     }
 
-    destroyRoom(room);
+    await destroyRoom(
+      room,
+      true
+    );
 
     json(res, 200, {
       ok: true
@@ -1851,17 +2282,19 @@ server.on(
   "upgrade",
   (request, socket, head) => {
     try {
+      const base =
+        PUBLIC_URL ||
+        `http://127.0.0.1:${PORT}`;
+
       const url =
         new URL(
           request.url,
-          PUBLIC_URL
+          base
         );
 
       /*
-        واجهة المستخدم:
-        /ws?room=ROOM_ID
+        فقط /ws مسموح له بالدخول.
       */
-
       if (
         url.pathname !==
         "/ws"
@@ -1874,6 +2307,11 @@ server.on(
         url.searchParams.get(
           "room"
         );
+
+      if (!roomId) {
+        socket.destroy();
+        return;
+      }
 
       const room =
         rooms.get(roomId);
@@ -1921,17 +2359,64 @@ browserWss.on(
 
     touchRoom(room);
 
+    room.lastBrowserActivityAt =
+      now();
+
     console.log(
       `🔌 Browser connected to room ${room.id}`
     );
 
-    ws.send(
-      JSON.stringify({
-        type: "state",
+    /*
+      إرسال الحالة فور الاتصال.
+    */
+    try {
+      ws.send(
+        JSON.stringify({
+          type: "state",
 
-        state:
-          publicRoomState(room)
-      })
+          state:
+            publicRoomState(room)
+        })
+      );
+    } catch (_) {}
+
+    /*
+      يسمح للواجهة بإرسال:
+      {"type":"ping"}
+      لإثبات أن الصفحة ما زالت مفتوحة.
+    */
+    ws.on(
+      "message",
+      (raw) => {
+        room.lastBrowserActivityAt =
+          now();
+
+        touchRoom(room);
+
+        let message;
+
+        try {
+          message =
+            JSON.parse(
+              raw.toString()
+            );
+        } catch (_) {
+          return;
+        }
+
+        if (
+          message?.type ===
+          "ping"
+        ) {
+          try {
+            ws.send(
+              JSON.stringify({
+                type: "pong"
+              })
+            );
+          } catch (_) {}
+        }
+      }
     );
 
     ws.on(
@@ -1940,6 +2425,9 @@ browserWss.on(
         room.browserClients.delete(
           ws
         );
+
+        room.lastBrowserActivityAt =
+          now();
 
         touchRoom(room);
 
@@ -1962,13 +2450,86 @@ browserWss.on(
 );
 
 /* =========================================================
-   تنظيف الغرف القديمة
+   حذف / تنظيف الغرفة
 ========================================================= */
 
-function destroyRoom(room) {
+async function revokeRestreamToken(
+  room
+) {
+  if (
+    !room?.restream
+  ) {
+    return;
+  }
+
+  const token =
+    room.restream.refreshToken ||
+    room.restream.accessToken;
+
+  if (!token) {
+    return;
+  }
+
+  /*
+    نحاول إلغاء التوكن.
+    إذا فشل الإلغاء لا نوقف حذف الغرفة.
+  */
+  try {
+    const body =
+      new URLSearchParams({
+        token,
+
+        token_type_hint:
+          room.restream.refreshToken
+            ? "refresh_token"
+            : "access_token"
+      });
+
+    const response =
+      await fetch(
+        "https://api.restream.io/oauth/revoke",
+        {
+          method: "POST",
+
+          headers: {
+            "Content-Type":
+              "application/x-www-form-urlencoded"
+          },
+
+          body:
+            body.toString()
+        }
+      );
+
+    if (!response.ok) {
+      console.warn(
+        `⚠️ Restream token revoke failed for room ${room.id}: HTTP ${response.status}`
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `⚠️ Restream token revoke error for room ${room.id}:`,
+      err.message
+    );
+  }
+}
+
+async function destroyRoom(
+  room,
+  revokeToken = false
+) {
   if (!room) {
     return;
   }
+
+  /*
+    نمنع استدعاء التنظيف أكثر من مرة.
+  */
+  if (room.destroying) {
+    return;
+  }
+
+  room.destroying = true;
 
   console.log(
     `🧹 حذف الغرفة: ${room.id}`
@@ -1976,20 +2537,45 @@ function destroyRoom(room) {
 
   room.active = false;
 
+  /*
+    أوقف Restream أولًا.
+  */
   stopRestreamChat(room);
 
+  /*
+    إلغاء التوكن اختياري.
+    عند انتهاء TTL نكتفي بمسحه من الذاكرة.
+    عند logout يمكننا إلغاءه من Restream أيضًا.
+  */
+  if (revokeToken) {
+    await revokeRestreamToken(
+      room
+    );
+  }
+
+  /*
+    إغلاق واجهات المتصفح.
+  */
   if (
     room.browserClients
   ) {
-    for (const ws of room.browserClients) {
+    for (
+      const ws of room.browserClients
+    ) {
       try {
-        ws.close();
+        ws.close(
+          1000,
+          "Room closed"
+        );
       } catch (_) {}
     }
 
     room.browserClients.clear();
   }
 
+  /*
+    حذف جميع البيانات الحساسة.
+  */
   room.participants = [];
 
   room.queue = [];
@@ -2002,24 +2588,69 @@ function destroyRoom(room) {
   room.restream.refreshToken =
     "";
 
+  room.restream.expiresAt =
+    0;
+
+  room.competitionStartedAt =
+    0;
+
+  room.chatConnectionStartedAt =
+    0;
+
+  /*
+    حذف الغرفة من الذاكرة.
+  */
   rooms.delete(
     room.id
   );
 }
+
+/* =========================================================
+   تنظيف الغرف القديمة
+========================================================= */
 
 setInterval(
   () => {
     const current =
       now();
 
-    for (const room of rooms.values()) {
+    for (
+      const room of rooms.values()
+    ) {
+      /*
+        إذا كان هناك نشاط حديث،
+        لا نحذف الغرفة.
+      */
       if (
         current -
-          room.lastActivityAt >
+          room.lastActivityAt <=
         ROOM_TTL_MS
       ) {
-        destroyRoom(room);
+        continue;
       }
+
+      /*
+        لا نحذف غرفة عليها متصفح متصل
+        حتى لو كانت المسابقة متوقفة.
+      */
+      if (
+        room.browserClients &&
+        room.browserClients.size > 0
+      ) {
+        continue;
+      }
+
+      destroyRoom(
+        room,
+        false
+      ).catch(
+        (err) => {
+          console.error(
+            `❌ Room cleanup error (${room.id}):`,
+            err.message
+          );
+        }
+      );
     }
   },
   60 * 1000
@@ -2043,7 +2674,7 @@ setInterval(
       if (
         current -
           session.createdAt >
-        10 * 60 * 1000
+        OAUTH_SESSION_TTL_MS
       ) {
         oauthSessions.delete(
           state
@@ -2077,7 +2708,7 @@ server.listen(
 );
 
 /* =========================================================
-   أخطاء
+   أخطاء السيرفر
 ========================================================= */
 
 server.on(
