@@ -5,96 +5,222 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 
-<title>شاشة فعالية الأرواح</title>
+<title>فعالية الأرواح</title>
 
 <style>
+
+*{
+  box-sizing:border-box;
+}
 
 html,
 body{
   margin:0;
-  width:100%;
-  height:100%;
-  background:transparent;
-  overflow:hidden;
+  min-height:100%;
 }
 
 body{
   font-family:Arial,sans-serif;
+
+  background:
+    radial-gradient(
+      circle at top,
+      #252c38 0,
+      #101318 55%,
+      #090c10 100%
+    );
+
+  color:#fff;
+
   display:flex;
   align-items:center;
   justify-content:center;
+
+  padding:25px;
 }
 
-.board{
-  width:min(900px,90vw);
+.card{
+  width:min(620px,100%);
+
+  background:#1b2028;
+
+  border:1px solid #303743;
+
+  border-radius:22px;
+
+  padding:35px;
+
+  box-shadow:
+    0 20px 60px rgba(0,0,0,.35);
+
+  text-align:center;
+}
+
+.logo{
+  font-size:58px;
+  margin-bottom:10px;
+}
+
+h1{
+  margin:0 0 12px;
+  font-size:32px;
+}
+
+.description{
+  color:#aab3bf;
+  line-height:1.8;
+  margin-bottom:28px;
+}
+
+button{
+  width:100%;
+
+  border:0;
+
+  border-radius:13px;
+
+  padding:15px 20px;
+
+  font:inherit;
+
+  font-weight:bold;
+
+  cursor:pointer;
+
+  color:#fff;
+
+  background:#16834a;
+
+  transition:.15s;
+}
+
+button:hover{
+  filter:brightness(1.12);
+}
+
+button:disabled{
+  opacity:.6;
+  cursor:not-allowed;
+}
+
+.result{
+  display:none;
+
+  margin-top:25px;
+
+  text-align:right;
+}
+
+.result.show{
+  display:block;
+}
+
+.success{
+  padding:14px;
+
+  border-radius:12px;
+
+  background:#123d29;
+
+  border:1px solid #1d6846;
+
+  color:#b8f3d2;
+
+  margin-bottom:18px;
+
+  text-align:center;
+}
+
+.box{
+  background:#11161c;
+
+  border:1px solid #303743;
+
+  border-radius:13px;
+
+  padding:14px;
+
+  margin-top:12px;
+}
+
+.box label{
+  display:block;
+
+  color:#aab3bf;
+
+  font-size:13px;
+
+  margin-bottom:8px;
+}
+
+.linkRow{
   display:flex;
-  flex-direction:column;
+
   gap:8px;
 }
 
-.row{
-  height:60px;
+.linkRow input{
+  flex:1;
 
-  display:grid;
+  min-width:0;
 
-  grid-template-columns:65px 1fr;
+  background:#0b0f14;
+
+  color:#fff;
+
+  border:1px solid #3a424e;
+
+  border-radius:9px;
+
+  padding:10px;
 
   direction:ltr;
 }
 
-.num,
-.name{
+.copy{
+  width:auto;
 
-  display:flex;
+  padding:10px 14px;
 
-  align-items:center;
-
-  box-sizing:border-box;
-
-  border:2px solid rgba(255,255,255,.32);
-
-  background:rgba(12,16,22,.62);
-
-  backdrop-filter:blur(5px);
-
-  color:#fff;
-
-  box-shadow:
-    0 4px 18px rgba(0,0,0,.22);
-}
-
-.num{
-
-  justify-content:center;
-
-  font-size:22px;
-
-  font-weight:900;
-
-  border-radius:
-    15px 0 0 15px;
-}
-
-.name{
-
-  direction:rtl;
-
-  justify-content:flex-start;
-
-  padding:0 20px;
-
-  font-size:24px;
-
-  font-weight:800;
-
-  border-radius:
-    0 15px 15px 0;
+  background:#245a9c;
 
   white-space:nowrap;
+}
 
-  overflow:hidden;
+.control{
+  margin-top:18px;
 
-  text-overflow:ellipsis;
+  background:#245a9c;
+}
+
+.error{
+  display:none;
+
+  margin-top:15px;
+
+  padding:12px;
+
+  border-radius:10px;
+
+  background:#4a1e24;
+
+  border:1px solid #7b222b;
+
+  color:#ffccd1;
+}
+
+.error.show{
+  display:block;
+}
+
+.note{
+  margin-top:22px;
+
+  color:#697482;
+
+  font-size:13px;
+
+  line-height:1.7;
 }
 
 </style>
@@ -103,150 +229,174 @@ body{
 
 <body>
 
-<div
-  class="board"
-  id="board"
-></div>
+<div class="card">
+
+  <div class="logo">🎮</div>
+
+  <h1>فعالية الأرواح</h1>
+
+  <div class="description">
+    أنشئ غرفتك الخاصة وابدأ مسابقتك.
+    <br>
+    لكل غرفة لوحة تحكم ورابط OBS مستقل.
+  </div>
+
+
+  <button
+    id="createButton"
+    onclick="createRoom()"
+  >
+    🏠 إنشاء غرفة جديدة
+  </button>
+
+
+  <div
+    id="error"
+    class="error"
+  ></div>
+
+
+  <div
+    id="result"
+    class="result"
+  >
+
+    <div class="success">
+      ✅ تم إنشاء غرفتك بنجاح
+    </div>
+
+
+    <div class="box">
+
+      <label>
+        🔧 رابط لوحة التحكم
+      </label>
+
+      <div class="linkRow">
+
+        <input
+          id="controlUrl"
+          readonly
+        >
+
+        <button
+          class="copy"
+          onclick="copyValue('controlUrl')"
+        >
+          📋 نسخ
+        </button>
+
+      </div>
+
+    </div>
+
+
+    <div class="box">
+
+      <label>
+        🖥️ رابط شاشة OBS
+      </label>
+
+      <div class="linkRow">
+
+        <input
+          id="obsUrl"
+          readonly
+        >
+
+        <button
+          class="copy"
+          onclick="copyValue('obsUrl')"
+        >
+          📋 نسخ
+        </button>
+
+      </div>
+
+    </div>
+
+
+    <button
+      id="openControl"
+      class="control"
+      onclick="openControl()"
+    >
+      🔧 فتح لوحة التحكم
+    </button>
+
+
+    <div class="note">
+
+      احتفظ برابط لوحة التحكم الخاص بك.
+      <br>
+      كل غرفة مستقلة عن الغرف الأخرى.
+
+    </div>
+
+  </div>
+
+</div>
 
 
 <script>
 
 /* =========================================================
-   الحصول على معرف الغرفة من الرابط
+   متغيرات
 ========================================================= */
 
-const pathParts =
-  window.location.pathname
-    .split("/")
-    .filter(Boolean);
-
-
-/*
-  الرابط يكون:
-
-  /obs/ROOM_ID
-*/
-
-const ROOM_ID =
-  pathParts.length >= 2 &&
-  pathParts[0] === "obs"
-    ? pathParts[1]
-    : null;
+let roomData = null;
 
 
 /* =========================================================
-   إذا لم يوجد Room ID
+   إنشاء غرفة
 ========================================================= */
 
-if (!ROOM_ID) {
+async function createRoom(){
 
-  document.body.innerHTML = `
-    <div style="
-      color:white;
-      font-family:Arial,sans-serif;
-      text-align:center;
-      padding:30px;
-    ">
-      ❌ رابط OBS غير صالح
-    </div>
-  `;
-
-  throw new Error(
-    "OBS room ID missing"
-  );
-
-}
-
-
-/* =========================================================
-   رسم المشاركين
-========================================================= */
-
-function render(state){
-
-  const board =
+  const button =
     document.getElementById(
-      "board"
+      "createButton"
     );
 
-  board.innerHTML = "";
+  const error =
+    document.getElementById(
+      "error"
+    );
 
-  const participants =
-    state?.participants || [];
-
-
-  /*
-    نعرض المشاركين الموجودين فقط.
-  */
-
-  participants.forEach(
-    (participant,index) => {
-
-      const row =
-        document.createElement(
-          "div"
-        );
-
-      row.className =
-        "row";
+  const result =
+    document.getElementById(
+      "result"
+    );
 
 
-      const num =
-        document.createElement(
-          "div"
-        );
-
-      num.className =
-        "num";
-
-      num.textContent =
-        index + 1;
-
-
-      const name =
-        document.createElement(
-          "div"
-        );
-
-      name.className =
-        "name";
-
-      name.textContent =
-        participant.youtubeName ||
-        "";
-
-
-      row.appendChild(
-        num
-      );
-
-      row.appendChild(
-        name
-      );
-
-      board.appendChild(
-        row
-      );
-
-    }
+  error.classList.remove(
+    "show"
   );
 
-}
+  result.classList.remove(
+    "show"
+  );
 
 
-/* =========================================================
-   تحميل حالة الغرفة
-========================================================= */
+  button.disabled = true;
 
-async function loadRoom(){
+  button.textContent =
+    "⏳ جاري إنشاء الغرفة...";
+
 
   try{
 
     const response =
       await fetch(
-        `/api/rooms/${encodeURIComponent(
-          ROOM_ID
-        )}`
+        "/api/rooms",
+        {
+          method:"POST",
+
+          headers:{
+            "Content-Type":
+              "application/json"
+          }
+        }
       );
 
 
@@ -259,27 +409,65 @@ async function loadRoom(){
       !data.ok
     ){
 
-      console.error(
+      throw new Error(
         data.error ||
-        "Room error"
+        "تعذر إنشاء الغرفة."
       );
-
-      return;
 
     }
 
 
-    render(
-      data.room
+    roomData =
+      data.room;
+
+
+    document.getElementById(
+      "controlUrl"
+    ).value =
+      roomData.controlUrl;
+
+
+    document.getElementById(
+      "obsUrl"
+    ).value =
+      roomData.obsUrl;
+
+
+    result.classList.add(
+      "show"
     );
 
 
-  }catch(error){
+    button.textContent =
+      "✅ تم إنشاء الغرفة";
+
+
+  }catch(err){
 
     console.error(
-      "Failed to load room:",
-      error
+      err
     );
+
+
+    error.textContent =
+      "❌ " +
+      (
+        err.message ||
+        "حدث خطأ أثناء إنشاء الغرفة."
+      );
+
+
+    error.classList.add(
+      "show"
+    );
+
+
+    button.disabled =
+      false;
+
+
+    button.textContent =
+      "🏠 إنشاء غرفة جديدة";
 
   }
 
@@ -287,117 +475,120 @@ async function loadRoom(){
 
 
 /* =========================================================
-   WebSocket
+   فتح لوحة التحكم
 ========================================================= */
 
-let ws = null;
+function openControl(){
+
+  if(
+    !roomData?.controlUrl
+  ){
+    return;
+  }
 
 
-function connectWebSocket(){
-
-  const protocol =
-    location.protocol === "https:"
-      ? "wss:"
-      : "ws:";
-
-
-  const url =
-    `${protocol}//${location.host}/ws?room=${encodeURIComponent(
-      ROOM_ID
-    )}`;
-
-
-  ws =
-    new WebSocket(
-      url
-    );
-
-
-  ws.onopen = () => {
-
-    console.log(
-      "🔌 OBS WebSocket connected"
-    );
-
-  };
-
-
-  ws.onmessage =
-    (event) => {
-
-      try{
-
-        const data =
-          JSON.parse(
-            event.data
-          );
-
-
-        if(
-          data.type === "state"
-        ){
-
-          render(
-            data.state
-          );
-
-        }
-
-      }catch(error){
-
-        console.error(
-          "OBS WebSocket message error:",
-          error
-        );
-
-      }
-
-    };
-
-
-  ws.onerror =
-    (error) => {
-
-      console.error(
-        "OBS WebSocket error:",
-        error
-      );
-
-    };
-
-
-  ws.onclose = () => {
-
-    console.log(
-      "🔌 OBS WebSocket disconnected"
-    );
-
-
-    /*
-      إعادة الاتصال تلقائيًا.
-    */
-
-    setTimeout(
-      () => {
-
-        connectWebSocket();
-
-      },
-      3000
-    );
-
-  };
+  window.location.href =
+    roomData.controlUrl;
 
 }
 
 
 /* =========================================================
-   تشغيل
+   نسخ الرابط
 ========================================================= */
 
-loadRoom();
+async function copyValue(
+  elementId
+){
 
-connectWebSocket();
+  const input =
+    document.getElementById(
+      elementId
+    );
+
+
+  const value =
+    input.value;
+
+
+  if(!value){
+    return;
+  }
+
+
+  try{
+
+    await navigator.clipboard
+      .writeText(
+        value
+      );
+
+
+    const buttons =
+      document.querySelectorAll(
+        ".copy"
+      );
+
+
+    /*
+      تغيير نص زر النسخ
+      لثانية واحدة.
+    */
+
+    buttons.forEach(
+      button => {
+
+        if(
+          button.previousElementSibling ===
+          input
+        ){
+
+          const oldText =
+            button.textContent;
+
+
+          button.textContent =
+            "✅ تم النسخ";
+
+
+          setTimeout(
+            () => {
+
+              button.textContent =
+                oldText;
+
+            },
+            1200
+          );
+
+        }
+
+      }
+    );
+
+
+  }catch(err){
+
+    /*
+      حل بديل إذا منع المتصفح
+      Clipboard API.
+    */
+
+    input.select();
+
+    input.setSelectionRange(
+      0,
+      input.value.length
+    );
+
+
+    alert(
+      "انسخ الرابط المحدد الآن."
+    );
+
+  }
+
+}
 
 </script>
 
