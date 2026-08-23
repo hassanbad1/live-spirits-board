@@ -2,44 +2,305 @@ const express = require("express");
 const http = require("http");
 const path = require("path");
 const fs = require("fs");
-const { google } = require("googleapis");
+const crypto = require("crypto");
 const WebSocket = require("ws");
-const grpc = require("@grpc/grpc-js");
-const protoLoader = require("@grpc/proto-loader");
 
 const PORT = process.env.PORT || 3000;
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
 
-app.use(express.json());
+app.use(express.json({ limit: "100kb" }));
+app.use(express.static(path.join(__dirname, "public")));
 
-/* =========================
-   الملفات العامة
-========================= */
+/* =========================================================
+   الإعدادات
+========================================================= */
 
-app.use(
-  express.static(
-    path.join(__dirname, "public")
-  )
-);
+const PUBLIC_URL =
+  process.env.RENDER_EXTERNAL_URL ||
+  "https://live-spirits-board.onrender.com";
 
-/* =========================
-   صفحات الموقع
-========================= */
+const REDIRECT_URI =
+  process.env.RESTREAM_REDIRECT_URI ||
+  `${PUBLIC_URL}/oauth2callback`;
+
+const RESTREAM_CLIENT_ID =
+  process.env.RESTREAM_CLIENT_ID || "";
+
+const RESTREAM_CLIENT_SECRET =
+  process.env.RESTREAM_CLIENT_SECRET || "";
+
+const ROOM_TTL_MS =
+  30 * 60 * 1000; // 30 دقيقة بعد آخر نشاط
+
+const MAX_PARTICIPANTS = 40;
+
+const DEFAULT_KEYWORD = "ارواح!";
+
+/* =========================================================
+   فحص إعدادات Restream
+========================================================= */
+
+if (!RESTREAM_CLIENT_ID) {
+  console.warn(
+    "⚠️ RESTREAM_CLIENT_ID غير موجود في Environment Variables."
+  );
+}
+
+if (!RESTREAM_CLIENT_SECRET) {
+  console.warn(
+    "⚠️ RESTREAM_CLIENT_SECRET غير موجود في Environment Variables."
+  );
+}
+
+/* =========================================================
+   الغرف
+========================================================= */
+
+/*
+  كل غرفة لها:
+  - معرف خاص
+  - كلمة تسجيل خاصة
+  - مشاركون خاصون
+  - Restream OAuth خاص
+  - WebSocket خاص
+  - رابط OBS خاص
+
+  لا يوجد state عالمي للمستخدمين.
+*/
+
+const rooms = new Map();
+
+/* =========================================================
+   أدوات عامة
+========================================================= */
+
+function cleanText(value, maxLength = 500) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function normalized(value) {
+  return String(value || "")
+    .trim()
+    .toLocaleLowerCase("ar");
+}
+
+function randomId(bytes = 18) {
+  return crypto.randomBytes(bytes).toString("base64url");
+}
+
+function now() {
+  return Date.now();
+}
+
+/* =========================================================
+   ملفات الجلسات المؤقتة
+========================================================= */
+
+/*
+  لا نخزن بيانات المستخدم في GitHub.
+  كل شيء مؤقت داخل ذاكرة السيرفر.
+
+  إذا أعاد Render التشغيل:
+  تختفي الغرف والـ tokens من الذاكرة.
+*/
+
+const oauthSessions = new Map();
+
+/* =========================================================
+   إنشاء غرفة
+========================================================= */
+
+function createRoom() {
+  const id = randomId(12);
+
+  const room = {
+    id,
+
+    createdAt: now(),
+
+    lastActivityAt: now(),
+
+    active: false,
+
+    keyword: DEFAULT_KEYWORD,
+
+    participants: [],
+
+    queue: [],
+
+    history: new Set(),
+
+    competitionStartedAt: 0,
+
+    status: "جاهز",
+
+    restream: {
+      accessToken: "",
+      refreshToken: "",
+      expiresAt: 0,
+
+      connected: false,
+
+      socket: null,
+
+      reconnectTimer: null,
+
+      reconnecting: false,
+
+      heartbeatTimer: null
+    }
+  };
+
+  rooms.set(id, room);
+
+  console.log(
+    `🏠 تم إنشاء غرفة جديدة: ${id}`
+  );
+
+  return room;
+}
+
+/* =========================================================
+   نشاط الغرفة
+========================================================= */
+
+function touchRoom(room) {
+  if (!room) {
+    return;
+  }
+
+  room.lastActivityAt = now();
+}
+
+/* =========================================================
+   حالة الغرفة العامة
+========================================================= */
+
+function publicRoomState(room) {
+  if (!room) {
+    return null;
+  }
+
+  return {
+    roomId: room.id,
+
+    active: room.active,
+
+    keyword: room.keyword,
+
+    participants:
+      room.participants.map((p) => ({
+        youtubeName: p.youtubeName,
+        comment: p.comment
+      })),
+
+    queued: room.queue.length,
+
+    count: room.participants.length,
+
+    status: room.status,
+
+    obsUrl:
+      `${PUBLIC_URL}/obs/${room.id}`
+  };
+}
+
+/* =========================================================
+   WebSocket للواجهة
+========================================================= */
+
+function sendRoomState(room) {
+  if (!room || !room.browserClients) {
+    return;
+  }
+
+  const message = JSON.stringify({
+    type: "state",
+    state: publicRoomState(room)
+  });
+
+  for (const client of room.browserClients) {
+    if (client.readyState === WebSocket.OPEN) {
+      try {
+        client.send(message);
+      } catch (err) {
+        console.error(
+          "❌ Browser WebSocket send error:",
+          err.message
+        );
+      }
+    }
+  }
+}
+
+/* =========================================================
+   إرسال JSON
+========================================================= */
+
+function json(res, status, data) {
+  res
+    .status(status)
+    .json(data);
+}
+
+/* =========================================================
+   التحقق من الغرفة
+========================================================= */
+
+function getRoomFromRequest(req, res) {
+  const roomId =
+    req.params.roomId ||
+    req.body?.roomId ||
+    req.query?.roomId;
+
+  if (!roomId) {
+    json(res, 400, {
+      ok: false,
+      error: "معرف الغرفة غير موجود."
+    });
+
+    return null;
+  }
+
+  const room = rooms.get(roomId);
+
+  if (!room) {
+    json(res, 404, {
+      ok: false,
+      error:
+        "هذه الغرفة انتهت أو لم تعد موجودة."
+    });
+
+    return null;
+  }
+
+  touchRoom(room);
+
+  return room;
+}
+
+/* =========================================================
+   الصفحة الرئيسية
+========================================================= */
 
 app.get("/", (req, res) => {
-  const publicIndex = path.join(
-    __dirname,
-    "public",
-    "index.html"
-  );
+  const publicIndex =
+    path.join(
+      __dirname,
+      "public",
+      "index.html"
+    );
 
-  const rootIndex = path.join(
-    __dirname,
-    "index.html"
-  );
+  const rootIndex =
+    path.join(
+      __dirname,
+      "index.html"
+    );
 
   if (fs.existsSync(publicIndex)) {
     return res.sendFile(publicIndex);
@@ -51,22 +312,30 @@ app.get("/", (req, res) => {
 
   res
     .status(404)
-    .send("لم يتم العثور على index.html.");
+    .send(
+      "لم يتم العثور على index.html"
+    );
 });
+
+/* =========================================================
+   لوحة التحكم
+========================================================= */
 
 app.get(
   "/control.html",
   (req, res, next) => {
-    const publicControl = path.join(
-      __dirname,
-      "public",
-      "control.html"
-    );
+    const publicControl =
+      path.join(
+        __dirname,
+        "public",
+        "control.html"
+      );
 
-    const rootControl = path.join(
-      __dirname,
-      "control.html"
-    );
+    const rootControl =
+      path.join(
+        __dirname,
+        "control.html"
+      );
 
     if (fs.existsSync(publicControl)) {
       return res.sendFile(
@@ -84,183 +353,560 @@ app.get(
   }
 );
 
-/* =========================
-   ملف البروتوكول
-========================= */
+/* =========================================================
+   صفحة OBS
+========================================================= */
 
-const PROTO_PATH = path.join(
-  __dirname,
-  "stream_list.proto"
+app.get(
+  "/obs/:roomId",
+  (req, res) => {
+    const room =
+      rooms.get(req.params.roomId);
+
+    if (!room) {
+      return res
+        .status(404)
+        .send(
+          "هذه الغرفة انتهت."
+        );
+    }
+
+    const publicObs =
+      path.join(
+        __dirname,
+        "public",
+        "obs.html"
+      );
+
+    const rootObs =
+      path.join(
+        __dirname,
+        "obs.html"
+      );
+
+    if (fs.existsSync(publicObs)) {
+      return res.sendFile(publicObs);
+    }
+
+    if (fs.existsSync(rootObs)) {
+      return res.sendFile(rootObs);
+    }
+
+    res
+      .status(404)
+      .send(
+        "لم يتم العثور على obs.html"
+      );
+  }
 );
 
-if (!fs.existsSync(PROTO_PATH)) {
-  throw new Error(
-    `ملف stream_list.proto غير موجود في مجلد المشروع: ${PROTO_PATH}`
-  );
-}
+/* =========================================================
+   إنشاء غرفة
+========================================================= */
 
-const packageDefinition =
-  protoLoader.loadSync(
-    PROTO_PATH,
-    {
-      keepCase: false,
-      longs: String,
-      enums: String,
-      defaults: true,
-      oneofs: true
-    }
-  );
+app.post(
+  "/api/rooms",
+  (req, res) => {
+    const room =
+      createRoom();
 
-const youtubeProto =
-  grpc.loadPackageDefinition(
-    packageDefinition
-  ).youtube.api.v3;
+    json(res, 200, {
+      ok: true,
 
-/* =========================
-   حالة التطبيق
-========================= */
+      room: {
+        roomId: room.id,
 
-const state = {
-  active: false,
+        controlUrl:
+          `${PUBLIC_URL}/control.html?room=${room.id}`,
 
-  broadcastId: "",
+        obsUrl:
+          `${PUBLIC_URL}/obs/${room.id}`,
 
-  // يتم حفظ chatId حتى لا نعيد طلبه
-  chatId: "",
-
-  keyword: "ارواح!",
-
-  participants: [],
-
-  history: new Set(),
-
-  queue: [],
-
-  streamCall: null,
-
-  competitionStartedAt: 0,
-
-  status: "متوقف",
-
-  // يمنع تشغيل أكثر من اتصال
-  reconnecting: false,
-
-  // عدد محاولات إعادة الاتصال
-  reconnectAttempts: 0,
-
-  // مؤقت إعادة الاتصال
-  reconnectTimer: null,
-
-  // يمنع إعادة البحث عن البث
-  broadcastLookupDone: false
-};
-
-/* =========================
-   الحالة العامة
-========================= */
-
-function publicState() {
-  return {
-    active: state.active,
-
-    broadcastId:
-      state.broadcastId,
-
-    keyword:
-      state.keyword,
-
-    participants:
-      state.participants.map(
-        (p) => ({
-          youtubeName:
-            p.youtubeName,
-
-          comment:
-            p.comment
-        })
-      ),
-
-    queued:
-      state.queue.length,
-
-    historyCount:
-      state.history.size,
-
-    status:
-      state.status
-  };
-}
-
-/* =========================
-   WebSocket
-========================= */
-
-function broadcast() {
-  const data =
-    JSON.stringify({
-      type: "state",
-      state: publicState()
+        state:
+          publicRoomState(room)
+      }
     });
+  }
+);
 
-  for (
-    const client of wss.clients
-  ) {
+/* =========================================================
+   معلومات الغرفة
+========================================================= */
+
+app.get(
+  "/api/rooms/:roomId",
+  (req, res) => {
+    const room =
+      getRoomFromRequest(
+        req,
+        res
+      );
+
+    if (!room) {
+      return;
+    }
+
+    json(res, 200, {
+      ok: true,
+
+      room: publicRoomState(room)
+    });
+  }
+);
+
+/* =========================================================
+   OAuth
+========================================================= */
+
+/*
+  نستخدم state مختلف لكل محاولة تسجيل دخول.
+  هذا يمنع CSRF.
+*/
+
+app.get(
+  "/api/auth/:roomId",
+  (req, res) => {
+    const room =
+      rooms.get(
+        req.params.roomId
+      );
+
+    if (!room) {
+      return res
+        .status(404)
+        .send(
+          "الغرفة غير موجودة أو انتهت."
+        );
+    }
+
     if (
-      client.readyState ===
-      WebSocket.OPEN
+      !RESTREAM_CLIENT_ID ||
+      !RESTREAM_CLIENT_SECRET
     ) {
-      try {
-        client.send(data);
-      } catch (err) {
+      return res
+        .status(500)
+        .send(
+          "إعدادات Restream غير موجودة في Render."
+        );
+    }
+
+    touchRoom(room);
+
+    const state =
+      randomId(24);
+
+    oauthSessions.set(
+      state,
+      {
+        roomId: room.id,
+
+        createdAt: now()
+      }
+    );
+
+    const params =
+      new URLSearchParams({
+        response_type: "code",
+
+        client_id:
+          RESTREAM_CLIENT_ID,
+
+        redirect_uri:
+          REDIRECT_URI,
+
+        state
+      });
+
+    const authorizeUrl =
+      `https://api.restream.io/login?${params.toString()}`;
+
+    console.log(
+      `🔗 بدء Restream OAuth للغرفة ${room.id}`
+    );
+
+    res.redirect(
+      authorizeUrl
+    );
+  }
+);
+
+/* =========================================================
+   OAuth Callback
+========================================================= */
+
+app.get(
+  "/oauth2callback",
+  async (req, res) => {
+    try {
+      const {
+        code,
+        state,
+        error
+      } = req.query;
+
+      if (error) {
+        return res
+          .status(400)
+          .send(
+            "تم إلغاء ربط Restream."
+          );
+      }
+
+      if (!code || !state) {
+        return res
+          .status(400)
+          .send(
+            "بيانات OAuth غير مكتملة."
+          );
+      }
+
+      const session =
+        oauthSessions.get(
+          state
+        );
+
+      oauthSessions.delete(
+        state
+      );
+
+      if (!session) {
+        return res
+          .status(400)
+          .send(
+            "جلسة OAuth غير صالحة أو انتهت."
+          );
+      }
+
+      if (
+        now() -
+          session.createdAt >
+        10 * 60 * 1000
+      ) {
+        return res
+          .status(400)
+          .send(
+            "انتهت صلاحية جلسة الربط. حاول مرة أخرى."
+          );
+      }
+
+      const room =
+        rooms.get(
+          session.roomId
+        );
+
+      if (!room) {
+        return res
+          .status(404)
+          .send(
+            "الغرفة انتهت أثناء عملية الربط."
+          );
+      }
+
+      touchRoom(room);
+
+      const basicAuth =
+        Buffer.from(
+          `${RESTREAM_CLIENT_ID}:${RESTREAM_CLIENT_SECRET}`
+        ).toString(
+          "base64"
+        );
+
+      const body =
+        new URLSearchParams({
+          grant_type:
+            "authorization_code",
+
+          redirect_uri:
+            REDIRECT_URI,
+
+          code
+        });
+
+      const response =
+        await fetch(
+          "https://api.restream.io/oauth/token",
+          {
+            method: "POST",
+
+            headers: {
+              "Content-Type":
+                "application/x-www-form-urlencoded",
+
+              Authorization:
+                `Basic ${basicAuth}`
+            },
+
+            body
+          }
+        );
+
+      const data =
+        await response.json();
+
+      if (!response.ok) {
         console.error(
-          "❌ WebSocket send error:",
-          err
+          "❌ Restream token exchange:",
+          data
+        );
+
+        throw new Error(
+          data?.error?.message ||
+            "فشل الحصول على Restream token."
         );
       }
+
+      room.restream.accessToken =
+        data.access_token ||
+        data.accessToken ||
+        "";
+
+      room.restream.refreshToken =
+        data.refresh_token ||
+        data.refreshToken ||
+        "";
+
+      const expiresIn =
+        Number(
+          data.expires_in ||
+            data.accessTokenExpiresIn ||
+            3600
+        );
+
+      room.restream.expiresAt =
+        now() +
+        Math.max(
+          60,
+          expiresIn - 120
+        ) *
+          1000;
+
+      room.status =
+        "تم ربط Restream بنجاح";
+
+      touchRoom(room);
+
+      console.log(
+        `✅ Restream connected for room ${room.id}`
+      );
+
+      sendRoomState(room);
+
+      res.send(`
+        <!doctype html>
+        <html lang="ar" dir="rtl">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width,initial-scale=1">
+          <title>تم الربط</title>
+        </head>
+
+        <body style="
+          margin:0;
+          min-height:100vh;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          background:#101318;
+          color:white;
+          font-family:Arial,sans-serif;
+        ">
+
+          <div style="
+            text-align:center;
+            padding:35px;
+          ">
+
+            <h2>✅ تم ربط Restream بنجاح</h2>
+
+            <p>
+              يمكنك العودة إلى لوحة التحكم.
+            </p>
+
+            <a
+              href="/control.html?room=${encodeURIComponent(
+                room.id
+              )}"
+              style="
+                display:inline-block;
+                margin-top:15px;
+                padding:12px 22px;
+                border-radius:10px;
+                background:#16834a;
+                color:white;
+                text-decoration:none;
+              "
+            >
+              العودة إلى لوحة التحكم
+            </a>
+
+          </div>
+
+        </body>
+        </html>
+      `);
+    } catch (err) {
+      console.error(
+        "❌ OAuth callback error:",
+        err
+      );
+
+      res
+        .status(500)
+        .send(
+          "فشل ربط Restream: " +
+            cleanText(
+              err.message,
+              500
+            )
+        );
     }
   }
-}
+);
 
-/* =========================
-   تنظيف النصوص
-========================= */
+/* =========================================================
+   Refresh Access Token
+========================================================= */
 
-function cleanText(
-  value,
-  maxLength = 500
+async function refreshAccessToken(
+  room
 ) {
-  return String(value || "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, maxLength);
+  if (
+    !room?.restream?.refreshToken
+  ) {
+    throw new Error(
+      "لا يوجد Refresh Token للغرفة."
+    );
+  }
+
+  const basicAuth =
+    Buffer.from(
+      `${RESTREAM_CLIENT_ID}:${RESTREAM_CLIENT_SECRET}`
+    ).toString(
+      "base64"
+    );
+
+  const body =
+    new URLSearchParams({
+      grant_type:
+        "refresh_token",
+
+      refresh_token:
+        room.restream.refreshToken
+    });
+
+  const response =
+    await fetch(
+      "https://api.restream.io/oauth/token",
+      {
+        method: "POST",
+
+        headers: {
+          "Content-Type":
+            "application/x-www-form-urlencoded",
+
+          Authorization:
+            `Basic ${basicAuth}`
+        },
+
+        body
+      }
+    );
+
+  const data =
+    await response.json();
+
+  if (!response.ok) {
+    console.error(
+      "❌ Restream refresh error:",
+      data
+    );
+
+    throw new Error(
+      data?.error?.message ||
+        "فشل تحديث Restream token."
+    );
+  }
+
+  room.restream.accessToken =
+    data.access_token ||
+    data.accessToken ||
+    room.restream.accessToken;
+
+  if (
+    data.refresh_token ||
+    data.refreshToken
+  ) {
+    room.restream.refreshToken =
+      data.refresh_token ||
+      data.refreshToken;
+  }
+
+  const expiresIn =
+    Number(
+      data.expires_in ||
+        data.accessTokenExpiresIn ||
+        3600
+    );
+
+  room.restream.expiresAt =
+    now() +
+    Math.max(
+      60,
+      expiresIn - 120
+    ) *
+      1000;
+
+  console.log(
+    `🔄 Restream token refreshed for room ${room.id}`
+  );
+
+  return room.restream.accessToken;
 }
 
-function normalized(value) {
-  return String(value || "")
-    .trim()
-    .toLocaleLowerCase("ar");
+/* =========================================================
+   الحصول على Access Token صالح
+========================================================= */
+
+async function getValidAccessToken(
+  room
+) {
+  if (!room.restream.accessToken) {
+    throw new Error(
+      "لم يتم ربط حساب Restream بهذه الغرفة."
+    );
+  }
+
+  if (
+    room.restream.expiresAt &&
+    now() <
+      room.restream.expiresAt
+  ) {
+    return room.restream.accessToken;
+  }
+
+  return refreshAccessToken(
+    room
+  );
 }
 
-/* =========================
-   فحص كلمة التسجيل
-========================= */
+/* =========================================================
+   كلمة التسجيل
+========================================================= */
 
 function registrationComment(
-  text
+  text,
+  keyword
 ) {
   const comment =
     cleanText(text);
 
-  const keyword =
+  const key =
     cleanText(
-      state.keyword,
+      keyword,
       100
     );
 
-  if (
-    !comment ||
-    !keyword
-  ) {
+  if (!comment || !key) {
     return null;
   }
 
@@ -268,7 +914,7 @@ function registrationComment(
     normalized(comment);
 
   const k =
-    normalized(keyword);
+    normalized(key);
 
   if (!c.startsWith(k)) {
     return null;
@@ -276,11 +922,9 @@ function registrationComment(
 
   const next =
     comment.charAt(
-      keyword.length
+      key.length
     );
 
-  // يجب أن تكون هناك مسافة
-  // بعد كلمة التسجيل
   if (
     next &&
     !/\s/.test(next)
@@ -291,353 +935,760 @@ function registrationComment(
   return comment;
 }
 
-/* =========================
+/* =========================================================
    إضافة مشارك
-========================= */
+========================================================= */
 
 function addParticipant(
+  room,
   displayName,
   userId,
   comment
 ) {
-  const youtubeName =
+  const name =
     cleanText(
       displayName,
       100
     );
 
-  const fullComment =
+  const text =
     cleanText(
       comment,
       500
     );
 
+  if (!name || !text) {
+    return false;
+  }
+
+  const key =
+    userId
+      ? `id:${userId}`
+      : `name:${normalized(name)}`;
+
   if (
-    !youtubeName ||
-    !fullComment
+    room.history.has(key)
   ) {
     return false;
   }
 
-  const key = userId
-    ? `id:${userId}`
-    : `name:${normalized(
-        youtubeName
-      )}`;
-
-  if (
-    state.history.has(key)
-  ) {
-    return false;
-  }
-
-  state.history.add(key);
+  room.history.add(key);
 
   const participant = {
-    youtubeName,
-    comment: fullComment,
+    youtubeName: name,
+
+    comment: text,
+
     key
   };
 
   if (
-    state.participants
-      .length < 40
+    room.participants.length <
+    MAX_PARTICIPANTS
   ) {
-    state.participants.push(
+    room.participants.push(
       participant
     );
   } else {
-    state.queue.push(
+    room.queue.push(
       participant
     );
   }
 
-  broadcast();
+  touchRoom(room);
+
+  sendRoomState(room);
 
   return true;
 }
 
-/* =========================
-   تعبئة القائمة من الانتظار
-========================= */
+/* =========================================================
+   تعبئة القائمة
+========================================================= */
 
-function fillFromQueue() {
+function fillFromQueue(room) {
   while (
-    state.participants
-      .length < 40 &&
-    state.queue.length > 0
+    room.participants.length <
+      MAX_PARTICIPANTS &&
+    room.queue.length > 0
   ) {
-    state.participants.push(
-      state.queue.shift()
+    room.participants.push(
+      room.queue.shift()
     );
   }
 }
 
-/* =========================
+/* =========================================================
    حذف مشارك
-========================= */
+========================================================= */
 
 function deleteParticipant(
+  room,
   index
 ) {
   if (
     !Number.isInteger(index) ||
     index < 0 ||
     index >=
-      state.participants.length
+      room.participants.length
   ) {
-    return;
+    return false;
   }
 
-  state.participants.splice(
+  room.participants.splice(
     index,
     1
   );
 
-  fillFromQueue();
+  fillFromQueue(room);
 
-  broadcast();
+  touchRoom(room);
+
+  sendRoomState(room);
+
+  return true;
 }
 
-/* =========================
-   إيقاف الاتصال
-========================= */
+/* =========================================================
+   إيقاف Restream Chat
+========================================================= */
 
-function stopStream() {
-  state.reconnecting =
-    false;
-
-  state.reconnectAttempts =
-    0;
+function stopRestreamChat(
+  room
+) {
+  if (!room) {
+    return;
+  }
 
   if (
-    state.reconnectTimer
+    room.restream.reconnectTimer
   ) {
     clearTimeout(
-      state.reconnectTimer
+      room.restream.reconnectTimer
     );
 
-    state.reconnectTimer =
+    room.restream.reconnectTimer =
       null;
   }
 
   if (
-    state.streamCall
+    room.restream.heartbeatTimer
+  ) {
+    clearInterval(
+      room.restream.heartbeatTimer
+    );
+
+    room.restream.heartbeatTimer =
+      null;
+  }
+
+  room.restream.reconnecting =
+    false;
+
+  if (
+    room.restream.socket
   ) {
     try {
-      state.streamCall.cancel();
+      room.restream.socket.close();
     } catch (_) {}
-
-    state.streamCall =
-      null;
   }
 
-  /*
-   * مهم:
-   * لا نحذف chatId هنا.
-   *
-   * إذا كانت المسابقة نفسها
-   * تعيد الاتصال، نستعمل نفس chatId
-   * بدون طلب جديد إلى YouTube.
-   */
+  room.restream.socket =
+    null;
+
+  room.restream.connected =
+    false;
 }
 
-/* =========================
-   إعداد Google OAuth
-========================= */
+/* =========================================================
+   بدء Restream Chat WebSocket
+========================================================= */
 
-function getConfig() {
-  const credsPath =
-    process.env.GOOGLE_CLIENT_SECRET ||
-    path.join(
-      __dirname,
-      "client_secret.json"
-    );
+async function startRestreamChat(
+  room
+) {
+  if (!room) {
+    return;
+  }
 
   if (
-    !fs.existsSync(credsPath)
+    !room.active
   ) {
-    throw new Error(
-      "ضع ملف client_secret.json داخل إعدادات Render كـ Secret File أو اضبط GOOGLE_CLIENT_SECRET."
-    );
+    return;
   }
-
-  const creds =
-    JSON.parse(
-      fs.readFileSync(
-        credsPath,
-        "utf8"
-      )
-    );
-
-  const config =
-    creds.installed ||
-    creds.web;
-
-  if (!config) {
-    throw new Error(
-      "ملف Google OAuth غير صحيح."
-    );
-  }
-
-  return config;
-}
-
-function makeOAuthClient() {
-  const config =
-    getConfig();
-
-  /*
-   * في Render نستخدم REDIRECT_URI
-   * الموجود في Environment Variables.
-   *
-   * القيمة الصحيحة:
-   * https://live-spirits-board.onrender.com/oauth2callback
-   */
-
-  const redirectUri =
-    process.env.REDIRECT_URI ||
-    `http://localhost:${PORT}/oauth2callback`;
-
-  return new google.auth.OAuth2(
-    config.client_id,
-    config.client_secret,
-    redirectUri
-  );
-}
-
-/* =========================
-   YouTube Client
-========================= */
-
-async function getYouTubeClient() {
-  const oauth2 =
-    makeOAuthClient();
-
-  const tokenPath =
-    process.env.YOUTUBE_TOKEN_PATH ||
-    path.join(
-      __dirname,
-      "token.json"
-    );
 
   if (
-    !fs.existsSync(tokenPath)
+    room.restream.socket &&
+    room.restream.socket.readyState ===
+      WebSocket.OPEN
   ) {
-    throw new Error(
-      "الحساب غير مربوط. اضغط «🔗 ربط حساب YouTube» أولاً."
-    );
+    return;
   }
 
-  oauth2.setCredentials(
-    JSON.parse(
-      fs.readFileSync(
-        tokenPath,
-        "utf8"
-      )
-    )
+  if (
+    room.restream.reconnecting
+  ) {
+    return;
+  }
+
+  const token =
+    await getValidAccessToken(
+      room
+    );
+
+  room.restream.reconnecting =
+    true;
+
+  room.status =
+    "الاتصال بشات Restream...";
+
+  sendRoomState(room);
+
+  const url =
+    `wss://chat.api.restream.io/ws?accessToken=${encodeURIComponent(
+      token
+    )}`;
+
+  console.log(
+    `🔌 Connecting Restream Chat for room ${room.id}`
   );
 
-  return {
-    youtube:
-      google.youtube({
-        version: "v3",
-        auth: oauth2
-      }),
+  const socket =
+    new WebSocket(url);
 
-    oauth2
-  };
-}
+  room.restream.socket =
+    socket;
 
-/* =========================
-   بدء OAuth
-========================= */
+  socket.on(
+    "open",
+    () => {
+      room.restream.reconnecting =
+        false;
 
-app.get(
-  "/api/auth",
-  (req, res) => {
-    try {
-      const oauth2 =
-        makeOAuthClient();
+      room.restream.connected =
+        true;
 
-      const url =
-        oauth2.generateAuthUrl({
-          access_type:
-            "offline",
+      room.status =
+        "متصل بشات Restream ويستقبل الرسائل";
 
-          scope: [
-            "https://www.googleapis.com/auth/youtube.readonly"
-          ],
+      touchRoom(room);
 
-          prompt: "consent"
-        });
-
-      res.redirect(url);
-    } catch (e) {
-      console.error(
-        "❌ OAuth start error:",
-        e
+      console.log(
+        `✅ Restream Chat connected: ${room.id}`
       );
 
-      res
-        .status(500)
-        .send(
-          "تعذر بدء ربط YouTube: " +
-            e.message
+      sendRoomState(room);
+
+      if (
+        room.restream.heartbeatTimer
+      ) {
+        clearInterval(
+          room.restream.heartbeatTimer
         );
+      }
+
+      /*
+        Restream يرسل heartbeat تقريبًا كل 45 ثانية.
+        إذا لم يصل heartbeat خلال 60 ثانية
+        نعيد إنشاء الاتصال.
+      */
+
+      room.restream.lastHeartbeatAt =
+        now();
+
+      room.restream.heartbeatTimer =
+        setInterval(
+          () => {
+            if (
+              !room.active
+            ) {
+              return;
+            }
+
+            if (
+              now() -
+                room.restream.lastHeartbeatAt >
+              70 * 1000
+            ) {
+              console.warn(
+                `⚠️ Restream heartbeat timeout: ${room.id}`
+              );
+
+              try {
+                socket.close();
+              } catch (_) {}
+            }
+          },
+          15000
+        );
+    }
+  );
+
+  socket.on(
+    "message",
+    (raw) => {
+      if (
+        room.restream.socket !==
+        socket
+      ) {
+        return;
+      }
+
+      touchRoom(room);
+
+      let action;
+
+      try {
+        action =
+          JSON.parse(
+            raw.toString()
+          );
+      } catch (err) {
+        console.error(
+          "❌ Invalid Restream message:",
+          err.message
+        );
+
+        return;
+      }
+
+      /*
+        heartbeat
+      */
+
+      if (
+        action.action ===
+        "heartbeat"
+      ) {
+        room.restream.lastHeartbeatAt =
+          now();
+
+        return;
+      }
+
+      /*
+        connection_info
+      */
+
+      if (
+        action.action ===
+        "connection_info"
+      ) {
+        const payload =
+          action.payload || {};
+
+        console.log(
+          `ℹ️ Restream connection ${payload.status} - room ${room.id}`
+        );
+
+        if (
+          payload.status ===
+          "error"
+        ) {
+          console.error(
+            "❌ Restream source error:",
+            payload.reason
+          );
+        }
+
+        return;
+      }
+
+      /*
+        connection_closed
+      */
+
+      if (
+        action.action ===
+        "connection_closed"
+      ) {
+        console.warn(
+          `⚠️ Restream source connection closed: ${room.id}`
+        );
+
+        return;
+      }
+
+      /*
+        event
+      */
+
+      if (
+        action.action !==
+        "event"
+      ) {
+        return;
+      }
+
+      const payload =
+        action.payload || {};
+
+      const eventPayload =
+        payload.eventPayload || {};
+
+      /*
+        نحتاج فقط رسائل النص.
+        نتجاهل Super Chat / Stickers / Memberships
+        وغيرها.
+
+        eventTypeId:
+        1  Discord
+        2  DLive
+        4  Twitch
+        5  YouTube
+        11 Facebook
+        21 LinkedIn
+        22 Trovo
+        24 X
+        25 Kick
+        32 Rumble
+      */
+
+      const text =
+        cleanText(
+          eventPayload.text,
+          500
+        );
+
+      if (!text) {
+        return;
+      }
+
+      /*
+        اسم المستخدم من مختلف المنصات.
+      */
+
+      const author =
+        eventPayload.author || {};
+
+      const displayName =
+        author.displayName ||
+        author.name ||
+        author.username ||
+        author.nickname ||
+        "مستخدم";
+
+      const userId =
+        author.id
+          ? String(author.id)
+          : null;
+
+      console.log(
+        `💬 Restream chat: ${text}`
+      );
+
+      /*
+        البحث عن كلمة التسجيل فقط.
+      */
+
+      const comment =
+        registrationComment(
+          text,
+          room.keyword
+        );
+
+      if (!comment) {
+        return;
+      }
+
+      const added =
+        addParticipant(
+          room,
+          displayName,
+          userId,
+          comment
+        );
+
+      if (added) {
+        console.log(
+          `✅ تمت إضافة مشارك في الغرفة ${room.id}: ${displayName} - ${comment}`
+        );
+      }
+    }
+  );
+
+  socket.on(
+    "error",
+    (err) => {
+      console.error(
+        `❌ Restream WebSocket error (${room.id}):`,
+        err.message
+      );
+    }
+  );
+
+  socket.on(
+    "close",
+    () => {
+      console.log(
+        `🔌 Restream Chat disconnected: ${room.id}`
+      );
+
+      if (
+        room.restream.socket ===
+        socket
+      ) {
+        room.restream.socket =
+          null;
+
+        room.restream.connected =
+          false;
+      }
+
+      if (
+        room.restream.heartbeatTimer
+      ) {
+        clearInterval(
+          room.restream.heartbeatTimer
+        );
+
+        room.restream.heartbeatTimer =
+          null;
+      }
+
+      if (
+        room.active
+      ) {
+        scheduleRestreamReconnect(
+          room
+        );
+      }
+    }
+  );
+}
+
+/* =========================================================
+   إعادة الاتصال بـRestream
+========================================================= */
+
+function scheduleRestreamReconnect(
+  room
+) {
+  if (
+    !room ||
+    !room.active ||
+    room.restream.reconnecting
+  ) {
+    return;
+  }
+
+  room.restream.reconnecting =
+    true;
+
+  room.status =
+    "إعادة الاتصال بـRestream...";
+
+  sendRoomState(room);
+
+  if (
+    room.restream.reconnectTimer
+  ) {
+    clearTimeout(
+      room.restream.reconnectTimer
+    );
+  }
+
+  room.restream.reconnectTimer =
+    setTimeout(
+      async () => {
+        room.restream.reconnectTimer =
+          null;
+
+        room.restream.reconnecting =
+          false;
+
+        if (
+          !room.active
+        ) {
+          return;
+        }
+
+        try {
+          await startRestreamChat(
+            room
+          );
+        } catch (err) {
+          console.error(
+            `❌ Restream reconnect failed (${room.id}):`,
+            err.message
+          );
+
+          room.status =
+            "تعذر الاتصال بـRestream، ستتم إعادة المحاولة...";
+
+          sendRoomState(room);
+
+          setTimeout(
+            () => {
+              if (
+                room.active
+              ) {
+                scheduleRestreamReconnect(
+                  room
+                );
+              }
+            },
+            5000
+          );
+        }
+      },
+      2000
+    );
+}
+
+/* =========================================================
+   بدء المسابقة
+========================================================= */
+
+app.post(
+  "/api/rooms/:roomId/start",
+  async (req, res) => {
+    const room =
+      getRoomFromRequest(
+        req,
+        res
+      );
+
+    if (!room) {
+      return;
+    }
+
+    try {
+      if (
+        req.body?.keyword
+      ) {
+        const keyword =
+          cleanText(
+            req.body.keyword,
+            100
+          );
+
+        if (!keyword) {
+          throw new Error(
+            "كلمة التسجيل لا يمكن أن تكون فارغة."
+          );
+        }
+
+        room.keyword =
+          keyword;
+      }
+
+      if (
+        !room.restream.accessToken
+      ) {
+        throw new Error(
+          "اربط حساب Restream أولًا."
+        );
+      }
+
+      stopRestreamChat(room);
+
+      room.participants = [];
+
+      room.queue = [];
+
+      room.history =
+        new Set();
+
+      room.competitionStartedAt =
+        now();
+
+      room.active = true;
+
+      room.status =
+        "يستعد للاتصال بشات Restream...";
+
+      touchRoom(room);
+
+      sendRoomState(room);
+
+      await startRestreamChat(
+        room
+      );
+
+      json(res, 200, {
+        ok: true,
+
+        state:
+          publicRoomState(room)
+      });
+    } catch (err) {
+      console.error(
+        `❌ Start error (${room.id}):`,
+        err
+      );
+
+      room.active = false;
+
+      room.status =
+        "خطأ";
+
+      stopRestreamChat(room);
+
+      sendRoomState(room);
+
+      json(res, 400, {
+        ok: false,
+
+        error:
+          err.message
+      });
     }
   }
 );
 
-/* =========================
-   API State
-========================= */
+/* =========================================================
+   إيقاف المسابقة
+========================================================= */
 
-app.get(
-  "/api/state",
+app.post(
+  "/api/rooms/:roomId/stop",
   (req, res) => {
-    res.json(
-      publicState()
-    );
+    const room =
+      getRoomFromRequest(
+        req,
+        res
+      );
+
+    if (!room) {
+      return;
+    }
+
+    room.active = false;
+
+    room.status =
+      "متوقف";
+
+    stopRestreamChat(room);
+
+    touchRoom(room);
+
+    sendRoomState(room);
+
+    json(res, 200, {
+      ok: true,
+
+      state:
+        publicRoomState(room)
+    });
   }
 );
 
-/* =========================
-   إعدادات المسابقة
-========================= */
+/* =========================================================
+   تغيير كلمة التسجيل
+========================================================= */
 
 app.post(
-  "/api/config",
+  "/api/rooms/:roomId/config",
   (req, res) => {
-    if (
-      Object.prototype.hasOwnProperty.call(
-        req.body,
-        "broadcastId"
-      )
-    ) {
-      const newBroadcastId =
-        String(
-          req.body.broadcastId ||
-            ""
-        ).trim();
+    const room =
+      getRoomFromRequest(
+        req,
+        res
+      );
 
-      /*
-       * إذا تغير Broadcast ID
-       * يجب مسح chatId القديم.
-       */
-
-      if (
-        newBroadcastId !==
-        state.broadcastId
-      ) {
-        state.chatId = "";
-
-        state.broadcastLookupDone =
-          false;
-      }
-
-      state.broadcastId =
-        newBroadcastId;
+    if (!room) {
+      return;
     }
 
     if (
@@ -653,963 +1704,359 @@ app.post(
         );
 
       if (!keyword) {
-        return res
-          .status(400)
-          .json({
-            ok: false,
-            error:
-              "كلمة التسجيل لا يمكن أن تكون فارغة."
-          });
+        return json(res, 400, {
+          ok: false,
+
+          error:
+            "كلمة التسجيل لا يمكن أن تكون فارغة."
+        });
       }
 
-      state.keyword =
+      room.keyword =
         keyword;
     }
 
-    broadcast();
+    touchRoom(room);
 
-    res.json({
+    sendRoomState(room);
+
+    json(res, 200, {
       ok: true,
+
       state:
-        publicState()
+        publicRoomState(room)
     });
   }
 );
 
-/* =========================
-   بدء المسابقة
-========================= */
+/* =========================================================
+   حذف مشارك
+========================================================= */
 
 app.post(
-  "/api/start",
-  async (req, res) => {
-    try {
-      stopStream();
-
-      state.participants =
-        [];
-
-      state.history =
-        new Set();
-
-      state.queue =
-        [];
-
-      /*
-       * إذا أرسل المستخدم Broadcast ID
-       * جديدًا، نحدثه ونمسح chatId القديم.
-       */
-
-      if (
-        req.body.broadcastId
-      ) {
-        const newBroadcastId =
-          String(
-            req.body.broadcastId
-          ).trim();
-
-        if (
-          newBroadcastId !==
-          state.broadcastId
-        ) {
-          state.broadcastId =
-            newBroadcastId;
-
-          state.chatId = "";
-
-          state.broadcastLookupDone =
-            false;
-        }
-      }
-
-      if (
-        req.body.keyword
-      ) {
-        state.keyword =
-          cleanText(
-            req.body.keyword,
-            100
-          );
-      }
-
-      if (
-        !state.keyword
-      ) {
-        throw new Error(
-          "اكتب كلمة التسجيل أولًا."
-        );
-      }
-
-      /*
-       * بداية مسابقة جديدة
-       */
-
-      state.competitionStartedAt =
-        Date.now();
-
-      state.active =
-        true;
-
-      state.reconnectAttempts =
-        0;
-
-      state.status =
-        "يستعد لقراءة الشات...";
-
-      broadcast();
-
-      await startStreaming();
-
-      broadcast();
-
-      res.json({
-        ok: true,
-        state:
-          publicState()
-      });
-    } catch (e) {
-      console.error(
-        "❌ Start competition error:",
-        e
+  "/api/rooms/:roomId/delete/:index",
+  (req, res) => {
+    const room =
+      getRoomFromRequest(
+        req,
+        res
       );
 
-      state.active =
-        false;
-
-      state.status =
-        "خطأ";
-
-      stopStream();
-
-      broadcast();
-
-      res
-        .status(400)
-        .json({
-          ok: false,
-          error:
-            e.message
-        });
+    if (!room) {
+      return;
     }
-  }
-);
 
-/* =========================
-   إيقاف المسابقة
-========================= */
+    const deleted =
+      deleteParticipant(
+        room,
+        Number(
+          req.params.index
+        )
+      );
 
-app.post(
-  "/api/stop",
-  (req, res) => {
-    state.active =
-      false;
-
-    state.status =
-      "متوقف";
-
-    stopStream();
-
-    broadcast();
-
-    res.json({
+    json(res, 200, {
       ok: true,
+
+      deleted,
+
       state:
-        publicState()
+        publicRoomState(room)
     });
   }
 );
 
-/* =========================
-   حذف مشارك
-========================= */
+/* =========================================================
+   Reset للغرفة
+========================================================= */
 
 app.post(
-  "/api/delete/:index",
+  "/api/rooms/:roomId/reset",
   (req, res) => {
-    deleteParticipant(
-      Number(
-        req.params.index
-      )
-    );
+    const room =
+      getRoomFromRequest(
+        req,
+        res
+      );
 
-    res.json({
-      ok: true,
-      state:
-        publicState()
-    });
-  }
-);
+    if (!room) {
+      return;
+    }
 
-/* =========================
-   إعادة ضبط
-========================= */
+    room.active = false;
 
-app.post(
-  "/api/reset",
-  (req, res) => {
-    state.active =
-      false;
+    room.status =
+      "جاهز";
 
-    state.status =
-      "متوقف";
+    stopRestreamChat(room);
 
-    stopStream();
+    room.participants = [];
 
-    state.participants =
-      [];
+    room.queue = [];
 
-    state.history =
+    room.history =
       new Set();
 
-    state.queue =
-      [];
-
-    state.competitionStartedAt =
+    room.competitionStartedAt =
       0;
 
-    /*
-     * نحتفظ بـ broadcastId و chatId
-     * حتى لا نحتاج طلب YouTube جديد
-     * بدون سبب.
-     */
+    touchRoom(room);
 
-    broadcast();
+    sendRoomState(room);
 
-    res.json({
+    json(res, 200, {
       ok: true,
+
       state:
-        publicState()
+        publicRoomState(room)
     });
   }
 );
 
-/* =========================
-   OAuth Callback
-========================= */
+/* =========================================================
+   Logout / إنهاء الغرفة
+========================================================= */
 
-app.get(
-  "/oauth2callback",
-  async (req, res) => {
+app.post(
+  "/api/rooms/:roomId/logout",
+  (req, res) => {
+    const room =
+      rooms.get(
+        req.params.roomId
+      );
+
+    if (!room) {
+      return json(res, 200, {
+        ok: true
+      });
+    }
+
+    destroyRoom(room);
+
+    json(res, 200, {
+      ok: true
+    });
+  }
+);
+
+/* =========================================================
+   WebSocket للمتصفحات
+========================================================= */
+
+const browserWss =
+  new WebSocket.Server({
+    noServer: true
+  });
+
+server.on(
+  "upgrade",
+  (request, socket, head) => {
     try {
-      if (
-        req.query.error
-      ) {
-        return res
-          .status(400)
-          .send(
-            "تم إلغاء ربط YouTube: " +
-              req.query.error
-          );
-      }
-
-      if (
-        !req.query.code
-      ) {
-        return res
-          .status(400)
-          .send(
-            "لم يصل رمز المصادقة من Google."
-          );
-      }
-
-      const oauth2 =
-        makeOAuthClient();
-
-      const { tokens } =
-        await oauth2.getToken(
-          req.query.code
+      const url =
+        new URL(
+          request.url,
+          PUBLIC_URL
         );
 
-      const tokenPath =
-        process.env.YOUTUBE_TOKEN_PATH ||
-        path.join(
-          __dirname,
-          "token.json"
+      /*
+        واجهة المستخدم:
+        /ws?room=ROOM_ID
+      */
+
+      if (
+        url.pathname !==
+        "/ws"
+      ) {
+        socket.destroy();
+        return;
+      }
+
+      const roomId =
+        url.searchParams.get(
+          "room"
         );
 
-      fs.writeFileSync(
-        tokenPath,
-        JSON.stringify(
-          tokens,
-          null,
-          2
-        )
+      const room =
+        rooms.get(roomId);
+
+      if (!room) {
+        socket.destroy();
+        return;
+      }
+
+      browserWss.handleUpgrade(
+        request,
+        socket,
+        head,
+        (ws) => {
+          browserWss.emit(
+            "connection",
+            ws,
+            request,
+            room
+          );
+        }
       );
-
-      res.send(`
-        <!doctype html>
-        <html lang="ar" dir="rtl">
-
-        <head>
-          <meta charset="utf-8">
-          <title>تم الربط</title>
-        </head>
-
-        <body style="
-          font-family:Arial;
-          text-align:center;
-          padding:50px;
-          background:#101318;
-          color:white
-        ">
-
-          <h2>✅ تم ربط حساب YouTube بنجاح</h2>
-
-          <p>
-            يمكنك الآن العودة إلى لوحة التحكم
-            والضغط على «بداية».
-          </p>
-
-          <a
-            href="/control.html"
-            style="
-              color:white;
-              background:#16834a;
-              padding:12px 20px;
-              border-radius:10px;
-              text-decoration:none
-            "
-          >
-            العودة إلى لوحة التحكم
-          </a>
-
-        </body>
-        </html>
-      `);
-    } catch (e) {
+    } catch (err) {
       console.error(
-        "❌ OAuth callback error:",
-        e
+        "❌ Browser WebSocket upgrade error:",
+        err.message
       );
 
-      res
-        .status(500)
-        .send(
-          "فشل الربط: " +
-            e.message
-        );
+      socket.destroy();
     }
   }
 );
 
-/* =========================
-   العثور على Live Chat
-========================= */
-
-async function findLiveChat(
-  youtube
-) {
-  /*
-   * أهم تعديل:
-   *
-   * إذا كان لدينا chatId بالفعل،
-   * لا نرسل أي طلب جديد إلى YouTube.
-   */
-
-  if (
-    state.chatId
-  ) {
-    console.log(
-      "♻️ استخدام Live Chat ID المحفوظ."
-    );
-
-    return state.chatId;
-  }
-
-  /*
-   * إذا كان لدينا Broadcast ID
-   * نبحث عنه مرة واحدة فقط.
-   */
-
-  if (
-    state.broadcastId
-  ) {
-    console.log(
-      "🔎 البحث عن Live Chat للبث..."
-    );
-
-    const b =
-      await youtube.liveBroadcasts.list(
-        {
-          part:
-            "snippet,status",
-
-          id: [
-            state.broadcastId
-          ]
-        }
-      );
-
-    const item =
-      (
-        b.data.items ||
-        []
-      )[0];
-
-    if (!item) {
-      throw new Error(
-        "لم أجد البث بهذا Broadcast ID."
-      );
-    }
-
-    if (
-      !item.snippet
-        ?.liveChatId
-    ) {
-      throw new Error(
-        "لم أجد Live Chat لهذا البث."
-      );
-    }
-
-    state.chatId =
-      item.snippet.liveChatId;
-
-    state.broadcastLookupDone =
-      true;
-
-    console.log(
-      "✅ تم حفظ Live Chat ID."
-    );
-
-    return state.chatId;
-  }
-
-  /*
-   * إذا لم يضع المستخدم Broadcast ID،
-   * نبحث عن بث مباشر يملكه الحساب.
-   *
-   * هذه العملية لا تتكرر عند reconnect
-   * لأن chatId سيتم حفظه بعد نجاحها.
-   */
-
-  if (
-    state.broadcastLookupDone
-  ) {
-    throw new Error(
-      "تعذر العثور على Live Chat."
-    );
-  }
-
-  console.log(
-    "🔎 البحث عن بث مباشر نشط..."
-  );
-
-  const r =
-    await youtube.liveBroadcasts.list(
-      {
-        part:
-          "id,snippet,status",
-
-        mine: true,
-
-        maxResults: 50
-      }
-    );
-
-  const active =
-    (
-      r.data.items ||
-      []
-    ).find(
-      (item) =>
-        item.status
-          ?.lifeCycleStatus ===
-        "live"
-    );
-
-  if (!active) {
-    throw new Error(
-      "لم أجد بث YouTube مباشرًا نشطًا. ضع Broadcast ID في لوحة التحكم."
-    );
-  }
-
-  state.broadcastId =
-    active.id;
-
-  if (
-    !active.snippet
-      ?.liveChatId
-  ) {
-    throw new Error(
-      "لم أجد Live Chat لهذا البث."
-    );
-  }
-
-  state.chatId =
-    active.snippet.liveChatId;
-
-  state.broadcastLookupDone =
-    true;
-
-  console.log(
-    "✅ تم العثور على Live Chat وحفظه."
-  );
-
-  return state.chatId;
-}
-
-/* =========================
-   معرفة خطأ الحصة
-========================= */
-
-function isQuotaError(
-  err
-) {
-  const text =
-    JSON.stringify(err || {})
-      .toLowerCase();
-
-  return (
-    text.includes(
-      "quotaexceeded"
-    ) ||
-    text.includes(
-      "quota exceeded"
-    ) ||
-    text.includes(
-      "resource_exhausted"
-    ) ||
-    err?.code === 8
-  );
-}
-
-/* =========================
-   الاتصال بـ YouTube Live Chat
-========================= */
-
-async function startStreaming() {
-  if (
-    !state.active
-  ) {
-    return;
-  }
-
-  /*
-   * منع تشغيل اتصالين
-   */
-
-  if (
-    state.streamCall ||
-    state.reconnecting
-  ) {
-    return;
-  }
-
-  const {
-    youtube,
-    oauth2
-  } =
-    await getYouTubeClient();
-
-  /*
-   * findLiveChat لن يرسل طلبًا
-   * جديدًا إذا كان chatId محفوظًا.
-   */
-
-  state.chatId =
-    await findLiveChat(
-      youtube
-    );
-
-  const access =
-    await oauth2.getAccessToken();
-
-  const accessToken =
-    typeof access === "string"
-      ? access
-      : access?.token;
-
-  if (!accessToken) {
-    throw new Error(
-      "تعذر الحصول على OAuth access token."
-    );
-  }
-
-  const client =
-    new youtubeProto
-      .V3DataLiveChatMessageService(
-        "youtube.googleapis.com:443",
-        grpc.credentials.createSsl()
-      );
-
-  const metadata =
-    new grpc.Metadata();
-
-  metadata.set(
-    "authorization",
-    `Bearer ${accessToken}`
-  );
-
-  /*
-   * Streaming Live Chat
-   *
-   * لا يوجد polling كل ثانية.
-   */
-
-  const request = {
-    liveChatId:
-      state.chatId,
-
-    part: [
-      "id",
-      "snippet",
-      "authorDetails"
-    ]
-  };
-
-  console.log(
-    "▶️ بدء الاتصال بـ YouTube Live Chat..."
-  );
-
-  const call =
-    client.streamList(
-      request,
-      metadata
-    );
-
-  state.streamCall =
-    call;
-
-  state.reconnecting =
-    false;
-
-  state.reconnectAttempts =
-    0;
-
-  state.status =
-    "متصل بالشات ويستقبل الرسائل الجديدة";
-
-  broadcast();
-
-  /* =========================
-     استقبال الرسائل
-  ========================= */
-
-  call.on(
-    "data",
-    (response) => {
-      if (
-        !state.active ||
-        state.streamCall !== call
-      ) {
-        return;
-      }
-
-      const items =
-        response.items ||
-        [];
-
-      for (
-        const m of items
-      ) {
-        const publishedAt =
-          m.snippet
-            ?.publishedAt;
-
-        const publishedMs =
-          publishedAt
-            ? Date.parse(
-                publishedAt
-              )
-            : NaN;
-
-        /*
-         * تجاهل الرسائل القديمة
-         */
-
-        if (
-          Number.isFinite(
-            publishedMs
-          ) &&
-          publishedMs <
-            state.competitionStartedAt
-        ) {
-          continue;
-        }
-
-        const text =
-          m.snippet
-            ?.displayMessage ||
-          "";
-
-        console.log(
-          "💬 رسالة YouTube:",
-          text
-        );
-
-        const comment =
-          registrationComment(
-            text
-          );
-
-        if (!comment) {
-          continue;
-        }
-
-        const added =
-          addParticipant(
-            m.authorDetails
-              ?.displayName,
-
-            m.authorDetails
-              ?.channelId,
-
-            comment
-          );
-
-        if (added) {
-          console.log(
-            "✅ تمت إضافة مشارك:",
-            m.authorDetails
-              ?.displayName,
-            "-",
-            comment
-          );
-        }
-      }
-    }
-  );
-
-  /* =========================
-     خطأ في الاتصال
-  ========================= */
-
-  call.on(
-    "error",
-    (err) => {
-      console.error(
-        "❌ YouTube stream error:",
-        err
-      );
-
-      if (
-        !state.active ||
-        state.streamCall !== call
-      ) {
-        return;
-      }
-
-      state.streamCall =
-        null;
-
-      /*
-       * إذا كانت المشكلة حصة،
-       * لا نبدأ حلقة reconnect سريعة.
-       */
-
-      if (
-        isQuotaError(err)
-      ) {
-        state.status =
-          "تم إيقاف إعادة المحاولة بسبب مشكلة في حصة YouTube.";
-
-        state.active =
-          false;
-
-        broadcast();
-
-        return;
-      }
-
-      scheduleReconnect();
-    }
-  );
-
-  /* =========================
-     انتهاء الاتصال
-  ========================= */
-
-  call.on(
-    "end",
-    () => {
-      console.log(
-        "⚠️ YouTube stream ended"
-      );
-
-      if (
-        !state.active ||
-        state.streamCall !== call
-      ) {
-        return;
-      }
-
-      state.streamCall =
-        null;
-
-      scheduleReconnect();
-    }
-  );
-}
-
-/* =========================
-   إعادة الاتصال الآمنة
-========================= */
-
-function scheduleReconnect() {
-  if (
-    !state.active ||
-    state.reconnecting
-  ) {
-    return;
-  }
-
-  /*
-   * لا نسمح بأكثر من مؤقت.
-   */
-
-  if (
-    state.reconnectTimer
-  ) {
-    return;
-  }
-
-  state.reconnecting =
-    true;
-
-  state.reconnectAttempts++;
-
-  /*
-   * Backoff:
-   *
-   * 1 محاولة بعد 2 ثواني
-   * ثم 4
-   * ثم 8
-   * ثم 16
-   * ثم 30 كحد أقصى
-   *
-   * هذا يمنع ضرب API
-   * بعشرات الطلبات في الثانية.
-   */
-
-  const delay =
-    Math.min(
-      30000,
-      2000 *
-        Math.pow(
-          2,
-          Math.min(
-            state.reconnectAttempts -
-              1,
-            4
-          )
-        )
-    );
-
-  state.status =
-    `انقطع الاتصال، إعادة المحاولة بعد ${Math.ceil(
-      delay / 1000
-    )} ثانية...`;
-
-  broadcast();
-
-  console.log(
-    `🔄 إعادة الاتصال بعد ${
-      delay / 1000
-    } ثانية...`
-  );
-
-  state.reconnectTimer =
-    setTimeout(
-      async () => {
-        state.reconnectTimer =
-          null;
-
-        state.reconnecting =
-          false;
-
-        if (
-          !state.active
-        ) {
-          return;
-        }
-
-        try {
-          /*
-           * مهم:
-           *
-           * startStreaming()
-           * سيستخدم chatId المحفوظ.
-           *
-           * لن يستدعي
-           * liveBroadcasts.list
-           * مرة أخرى.
-           */
-
-          await startStreaming();
-
-          console.log(
-            "✅ تمت إعادة الاتصال بنجاح."
-          );
-        } catch (e) {
-          console.error(
-            "❌ Reconnect failed:",
-            e
-          );
-
-          /*
-           * إذا كان الخطأ quotaExceeded
-           * نوقف المحاولات.
-           */
-
-          if (
-            isQuotaError(e)
-          ) {
-            state.active =
-              false;
-
-            state.status =
-              "تم إيقاف الاتصال بسبب استنفاد حصة YouTube.";
-
-            broadcast();
-
-            return;
-          }
-
-          state.status =
-            "تعذر الاتصال، ستتم إعادة المحاولة...";
-
-          broadcast();
-
-          scheduleReconnect();
-        }
-      },
-      delay
-    );
-}
-
-/* =========================
-   WebSocket connection
-========================= */
-
-wss.on(
+browserWss.on(
   "connection",
-  (ws) => {
+  (ws, request, room) => {
+    if (!room.browserClients) {
+      room.browserClients =
+        new Set();
+    }
+
+    room.browserClients.add(
+      ws
+    );
+
+    touchRoom(room);
+
     console.log(
-      "🔌 WebSocket client connected"
+      `🔌 Browser connected to room ${room.id}`
     );
 
     ws.send(
       JSON.stringify({
         type: "state",
+
         state:
-          publicState()
+          publicRoomState(room)
       })
     );
 
     ws.on(
       "close",
       () => {
+        room.browserClients.delete(
+          ws
+        );
+
+        touchRoom(room);
+
         console.log(
-          "🔌 WebSocket client disconnected"
+          `🔌 Browser disconnected from room ${room.id}`
+        );
+      }
+    );
+
+    ws.on(
+      "error",
+      (err) => {
+        console.error(
+          `❌ Browser WS error (${room.id}):`,
+          err.message
         );
       }
     );
   }
 );
 
-/* =========================
+/* =========================================================
+   تنظيف الغرف القديمة
+========================================================= */
+
+function destroyRoom(room) {
+  if (!room) {
+    return;
+  }
+
+  console.log(
+    `🧹 حذف الغرفة: ${room.id}`
+  );
+
+  room.active = false;
+
+  stopRestreamChat(room);
+
+  if (
+    room.browserClients
+  ) {
+    for (const ws of room.browserClients) {
+      try {
+        ws.close();
+      } catch (_) {}
+    }
+
+    room.browserClients.clear();
+  }
+
+  room.participants = [];
+
+  room.queue = [];
+
+  room.history.clear();
+
+  room.restream.accessToken =
+    "";
+
+  room.restream.refreshToken =
+    "";
+
+  rooms.delete(
+    room.id
+  );
+}
+
+setInterval(
+  () => {
+    const current =
+      now();
+
+    for (const room of rooms.values()) {
+      if (
+        current -
+          room.lastActivityAt >
+        ROOM_TTL_MS
+      ) {
+        destroyRoom(room);
+      }
+    }
+  },
+  60 * 1000
+);
+
+/* =========================================================
+   تنظيف OAuth Sessions القديمة
+========================================================= */
+
+setInterval(
+  () => {
+    const current =
+      now();
+
+    for (
+      const [
+        state,
+        session
+      ] of oauthSessions
+    ) {
+      if (
+        current -
+          session.createdAt >
+        10 * 60 * 1000
+      ) {
+        oauthSessions.delete(
+          state
+        );
+      }
+    }
+  },
+  60 * 1000
+);
+
+/* =========================================================
    تشغيل السيرفر
-========================= */
+========================================================= */
 
 server.listen(
   PORT,
@@ -1620,25 +2067,18 @@ server.listen(
     );
 
     console.log(
-      "لوحة التحكم: /control.html"
+      `🌐 Public URL: ${PUBLIC_URL}`
     );
 
     console.log(
-      "شاشة OBS: /display.html"
-    );
-
-    console.log(
-      `Public URL: ${
-        process.env.RENDER_EXTERNAL_URL ||
-        `http://localhost:${PORT}`
-      }`
+      `🔐 Restream Redirect URI: ${REDIRECT_URI}`
     );
   }
 );
 
-/* =========================
-   أخطاء السيرفر
-========================= */
+/* =========================================================
+   أخطاء
+========================================================= */
 
 server.on(
   "error",
